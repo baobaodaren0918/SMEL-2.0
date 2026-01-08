@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "person",
+  "description": "MongoDB Person document with nested address and tags array",
+  "bsonType": "object",
+  "required": ["_id", "name"],
+  "properties": {
+    "_id": {
+      "bsonType": "string",
+      "description": "Primary key"
+    },
+    "name": {
+      "bsonType": "string",
+      "description": "Person name"
+    },
+    "address": {
+      "bsonType": "object",
+      "description": "Embedded address document",
+      "properties": {
+        "street": { "bsonType": "string" },
+        "city": { "bsonType": "string" }
+      }
+    },
+    "tags": {
+      "bsonType": "array",
+      "description": "Array of tags",
+      "items": { "bsonType": "string" }
+    }
+  }
+}

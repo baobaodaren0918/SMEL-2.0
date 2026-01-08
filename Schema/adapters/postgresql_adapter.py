@@ -5,7 +5,8 @@ Converts CREATE TABLE statements to Database/EntityType/Attribute objects.
 import re
 from typing import Dict, List, Optional, Tuple
 from ..unified_meta_schema import (
-    Database, DatabaseType, EntityType, Attribute, Key, KeyType,
+    Database, DatabaseType, EntityType, Attribute,
+    UniqueConstraint, UniqueProperty, PKTypeEnum,
     Reference, Cardinality, PrimitiveDataType, PrimitiveType
 )
 
@@ -80,7 +81,7 @@ class PostgreSQLAdapter:
 
     def _parse_table(self, table_name: str, table_body: str) -> EntityType:
         """Parse a single CREATE TABLE body."""
-        entity = EntityType(en_name=table_name.lower())
+        entity = EntityType(object_name=[table_name.lower()])
 
         # Split by comma, but handle parentheses in type definitions
         columns = self._split_columns(table_body)
@@ -102,21 +103,27 @@ class PostgreSQLAdapter:
 
                 # Handle PRIMARY KEY in column definition
                 if 'PRIMARY KEY' in col_def.upper():
-                    key = Key(key_type=KeyType.PRIMARY)
-                    key.add_attribute(attr)
-                    entity.add_key(key)
+                    constraint = UniqueConstraint(
+                        is_primary_key=True,
+                        is_managed=True,
+                        unique_properties=[UniqueProperty(primary_key_type=PKTypeEnum.SIMPLE, property_id=attr.meta_id)]
+                    )
+                    entity.add_constraint(constraint)
 
                 # Store reference for later resolution
                 if ref_info:
-                    self._pending_references.append((entity.en_name, ref_info[0], ref_info[1]))
+                    self._pending_references.append((entity.name, ref_info[0], ref_info[1]))
 
         # Create primary key if SERIAL is used
         if not entity.get_primary_key():
             for attr in entity.attributes:
                 if attr.is_key:
-                    key = Key(key_type=KeyType.PRIMARY)
-                    key.add_attribute(attr)
-                    entity.add_key(key)
+                    constraint = UniqueConstraint(
+                        is_primary_key=True,
+                        is_managed=True,
+                        unique_properties=[UniqueProperty(primary_key_type=PKTypeEnum.SIMPLE, property_id=attr.meta_id)]
+                    )
+                    entity.add_constraint(constraint)
                     break
 
         return entity
@@ -295,9 +302,9 @@ class PostgreSQLAdapter:
             for rel in entity.relationships:
                 if isinstance(rel, Reference):
                     target = rel.get_target_entity_name()
-                    if target != entity.en_name:  # Avoid self-reference
+                    if target != entity.name:  # Avoid self-reference
                         deps.add(target)
-            dependencies[entity.en_name] = deps
+            dependencies[entity.name] = deps
 
         # Topological sort
         sorted_names = []
@@ -321,7 +328,7 @@ class PostgreSQLAdapter:
     def _export_entity_to_ddl(cls, entity: EntityType, database: Database) -> str:
         """Export a single entity to CREATE TABLE statement."""
         lines = []
-        lines.append(f"CREATE TABLE {entity.en_name} (")
+        lines.append(f"CREATE TABLE {entity.name} (")
 
         columns = []
         constraints = []
@@ -401,8 +408,11 @@ class PostgreSQLAdapter:
             target_entity = database.get_entity_type(entity_name)
             if target_entity:
                 pk = target_entity.get_primary_key()
-                if pk and pk.key_attributes:
-                    return pk.key_attributes[0].attr_name
+                if pk and pk.unique_properties:
+                    # Use property_id to look up the attribute
+                    pk_attr = target_entity.get_attribute_by_id(pk.unique_properties[0].property_id)
+                    if pk_attr:
+                        return pk_attr.attr_name
 
         # Fallback: default naming convention
         return f"{entity_name}_id"

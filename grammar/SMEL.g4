@@ -19,7 +19,7 @@ nestClause: withCardinalityClause | usingKeyClause | whereClause;
 unnest: UNNEST identifier FROM identifier unnestClause*;            // UNNEST embedded FROM Parent
 unnestClause: AS identifier | usingKeyClause;
 flatten: FLATTEN qualifiedName (INTO|AS) identifier flattenClause*; // FLATTEN Parent.child INTO NewEntity
-flattenClause: renameClause | addReferenceClause;
+flattenClause: generateKeyClause | renameClause | addReferenceClause;
 unwind: UNWIND qualifiedName AS identifier unwindClause*;           // UNWIND array[] AS NewEntity
 unwindClause: generateKeyClause | addReferenceClause | linkingClause;
 
@@ -29,7 +29,7 @@ usingKeyClause: USING KEY identifier;                               // USING KEY
 whereClause: WHERE condition;                                       // WHERE a.id = b.ref_id
 renameClause: RENAME identifier TO qualifiedName (IN identifier)?;  // RENAME old TO new [IN entity]
 addReferenceClause: ADD REFERENCE identifier TO identifier;         // ADD REFERENCE ref_id TO Target
-generateKeyClause: GENERATE KEY identifier (AS SERIAL | FROM identifier); // GENERATE KEY id AS SERIAL
+generateKeyClause: GENERATE KEY identifier (AS SERIAL | AS STRING PREFIX STRING_LITERAL | FROM identifier); // GENERATE KEY id AS SERIAL | AS STRING PREFIX "a"
 linkingClause: LINKING qualifiedName TO identifier;                 // LINKING source.field TO target
 
 // Standalone operations
@@ -191,7 +191,7 @@ ZERO_TO_ONE: 'ZERO_TO_ONE'; ZERO_TO_MANY: 'ZERO_TO_MANY';           // ? = (0,1)
 STRING: 'String'; TEXT: 'Text'; INT: 'Int'; INTEGER: 'Integer'; LONG: 'Long';
 DOUBLE: 'Double'; FLOAT: 'Float'; DECIMAL: 'Decimal'; BOOLEAN: 'Boolean';
 DATE: 'Date'; DATETIME: 'DateTime'; TIMESTAMP: 'Timestamp'; UUID: 'UUID'; BINARY: 'Binary';
-TYPE: 'TYPE'; DEFAULT: 'DEFAULT'; SERIAL: 'SERIAL';
+TYPE: 'TYPE'; DEFAULT: 'DEFAULT'; SERIAL: 'SERIAL'; PREFIX: 'PREFIX';
 
 // Constraints
 NOT_NULL: 'NOT NULL';

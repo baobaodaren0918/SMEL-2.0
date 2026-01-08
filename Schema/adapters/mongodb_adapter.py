@@ -5,8 +5,9 @@ Converts MongoDB JSON Schema (with bsonType) to Database/EntityType/Attribute ob
 import json
 from typing import Dict, Any, Optional, List
 from ..unified_meta_schema import (
-    Database, DatabaseType, EntityType, Attribute, Key, KeyType,
-    Embedded, Cardinality, PrimitiveDataType, PrimitiveType
+    Database, DatabaseType, EntityType, Attribute,
+    UniqueConstraint, UniqueProperty, PKTypeEnum,
+    Embedded, Cardinality, PrimitiveDataType, PrimitiveType, ListDataType
 )
 
 
@@ -37,14 +38,18 @@ class MongoDBAdapter:
 
         # Parse root document as main entity
         root_name = schema.get('title', 'root_document').lower().replace(' ', '_')
-        root_entity = self._parse_object_schema(schema, root_name, is_root=True)
+        root_entity = self._parse_object_schema(schema, root_name, parent_path=[], is_root=True)
         self.database.add_entity_type(root_entity)
 
         return self.database
 
-    def _parse_object_schema(self, schema: Dict[str, Any], name: str, is_root: bool = False) -> EntityType:
+    def _parse_object_schema(self, schema: Dict[str, Any], name: str, parent_path: List[str] = None, is_root: bool = False) -> EntityType:
         """Parse an object schema into EntityType."""
-        entity = EntityType(en_name=name)
+        if parent_path is None:
+            parent_path = []
+        # Build full object_name path (Andre Conrad style)
+        object_name = parent_path + [name]
+        entity = EntityType(object_name=object_name)
 
         properties = schema.get('properties', {})
         required = set(schema.get('required', []))
@@ -57,13 +62,13 @@ class MongoDBAdapter:
             bson_type = prop_schema.get('bsonType') or prop_schema.get('type', 'string')
 
             if bson_type == 'object':
-                # Embedded object
-                embedded_entity = self._parse_object_schema(prop_schema, prop_name_lower)
+                # Embedded object - pass current entity's object_name as parent_path
+                embedded_entity = self._parse_object_schema(prop_schema, prop_name_lower, parent_path=object_name)
                 self.database.add_entity_type(embedded_entity)
 
                 embedded = Embedded(
                     aggr_name=prop_name_lower,
-                    aggregates=prop_name_lower,
+                    aggregates=embedded_entity.full_path,  # Use full path for reference
                     cardinality=Cardinality.ONE_TO_ONE if is_required else Cardinality.ZERO_TO_ONE,
                     is_optional=not is_required
                 )
@@ -75,22 +80,23 @@ class MongoDBAdapter:
                 items_type = items.get('bsonType') or items.get('type', 'string')
 
                 if items_type == 'object':
-                    # Array of embedded objects
-                    embedded_entity = self._parse_object_schema(items, prop_name_lower)
+                    # Array of embedded objects - pass current entity's object_name as parent_path
+                    embedded_entity = self._parse_object_schema(items, prop_name_lower, parent_path=object_name)
                     self.database.add_entity_type(embedded_entity)
 
                     embedded = Embedded(
                         aggr_name=prop_name_lower,
-                        aggregates=prop_name_lower,
+                        aggregates=embedded_entity.full_path,  # Use full path for reference
                         cardinality=Cardinality.ONE_TO_MANY if is_required else Cardinality.ZERO_TO_MANY,
                         is_optional=not is_required
                     )
                     entity.add_relationship(embedded)
                 else:
-                    # Array of primitives - treat as attribute
+                    # Array of primitives - use ListDataType to preserve array semantics
+                    element_type = self._parse_primitive_type(items_type, items)
                     attr = Attribute(
                         attr_name=prop_name_lower,
-                        data_type=self._parse_primitive_type(items_type, items),
+                        data_type=ListDataType(element_type=element_type),
                         is_key=False,
                         is_optional=not is_required
                     )
@@ -109,9 +115,12 @@ class MongoDBAdapter:
 
                 # Add primary key if _id
                 if is_key:
-                    key = Key(key_type=KeyType.PRIMARY)
-                    key.add_attribute(attr)
-                    entity.add_key(key)
+                    constraint = UniqueConstraint(
+                        is_primary_key=True,
+                        is_managed=True,
+                        unique_properties=[UniqueProperty(primary_key_type=PKTypeEnum.SIMPLE, property_id=attr.meta_id)]
+                    )
+                    entity.add_constraint(constraint)
 
         return entity
 
@@ -219,8 +228,8 @@ class MongoDBAdapter:
 
         if is_root:
             schema["$schema"] = "http://json-schema.org/draft-07/schema#"
-            schema["title"] = entity.en_name.replace('_', ' ')
-            schema["description"] = f"MongoDB document schema for {entity.en_name}"
+            schema["title"] = entity.name.replace('_', ' ')
+            schema["description"] = f"MongoDB document schema for {entity.name}"
 
         # Process attributes
         for attr in entity.attributes:

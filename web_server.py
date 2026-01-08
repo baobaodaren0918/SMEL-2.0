@@ -815,6 +815,7 @@ def get_html():
                     <option value="d2r" selected>Document &rarr; Relational</option>
                     <option value="r2r">Relational &rarr; Relational (v1 &rarr; v2)</option>
                     <option value="d2d">Document &rarr; Document (v1 &rarr; v2)</option>
+                    <option value="person_d2r">Person: MongoDB &rarr; PostgreSQL (Mini Example)</option>
                 </select>
             </div>
         </div>

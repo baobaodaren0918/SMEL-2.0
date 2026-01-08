@@ -71,6 +71,20 @@ def get_source_entity_lines(entity: EntityType, width: int, source_type: str) ->
     return lines
 
 
+def _get_type_str(data_type) -> str:
+    """Get type string from any DataType (handles ListDataType, etc.)."""
+    if hasattr(data_type, 'primitive_type'):
+        return data_type.primitive_type.value
+    elif hasattr(data_type, 'element_type'):
+        # ListDataType or SetDataType
+        elem_str = _get_type_str(data_type.element_type)
+        return f"{elem_str}[]"
+    elif hasattr(data_type, 'key_type'):
+        # MapDataType
+        return "map"
+    return "unknown"
+
+
 def get_entity_lines(entity: EntityType, width: int, highlights: Set[str] = None) -> List[str]:
     """Format entity as lines with Unified Meta Schema format, with optional highlighting."""
     highlights = highlights or set()
@@ -84,7 +98,8 @@ def get_entity_lines(entity: EntityType, width: int, highlights: Set[str] = None
 
     for attr in entity.attributes:
         marker = "[PK]" if attr.is_key else ("?" if attr.is_optional else "")
-        line = f"    {attr.attr_name}: {attr.data_type.primitive_type.value} {marker}"
+        type_str = _get_type_str(attr.data_type)
+        line = f"    {attr.attr_name}: {type_str} {marker}"
         lines.append(line.ljust(width))
 
     for rel in entity.relationships:
@@ -249,6 +264,8 @@ def main():
     print(f"\n  {CYAN}Schema Evolution (Same Model):{RESET}")
     print("  [3] Relational -> Relational (SQL v1 -> v2)")
     print("  [4] Document -> Document (MongoDB v1 -> v2)")
+    print(f"\n  {CYAN}Mini Examples:{RESET}")
+    print("  [5] Person: MongoDB -> PostgreSQL (Mini Example)")
     print("\n  [0] Exit")
 
     try:
@@ -258,7 +275,7 @@ def main():
 
     if choice == "0":
         return 0
-    if choice not in ("1", "2", "3", "4"):
+    if choice not in ("1", "2", "3", "4", "5"):
         print("Invalid choice")
         return 1
 
@@ -284,13 +301,20 @@ def main():
         source_type, target_type = "Relational", "Relational"
         source_adapter = PostgreSQLAdapter
         target_adapter = PostgreSQLAdapter
-    else:  # choice == "4"
+    elif choice == "4":
         source_file = SCHEMA_DIR / "pain001_mongodb.json"
         target_file = SCHEMA_DIR / "pain001_mongodb_v2.json"
         smel_file = TESTS_DIR / "mongo_v1_to_v2.smel"
         source_type, target_type = "Document", "Document"
         source_adapter = MongoDBAdapter
         target_adapter = MongoDBAdapter
+    else:  # choice == "5"
+        source_file = TESTS_DIR / "person_mongodb.json"
+        target_file = TESTS_DIR / "person_postgresql.sql"
+        smel_file = TESTS_DIR / "person_mongo_to_pg_minibeispiel1.smel"
+        source_type, target_type = "Document", "Relational"
+        source_adapter = MongoDBAdapter
+        target_adapter = PostgreSQLAdapter
 
     # Check files exist
     for f in [source_file, target_file, smel_file]:

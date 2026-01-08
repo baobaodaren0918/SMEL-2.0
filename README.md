@@ -18,6 +18,7 @@ SMEL (Schema Migration & Evolution Language) provides a unified approach to:
 | 2 | Document → Relational | Cross-model migration | `mongo_to_pg.smel` |
 | 3 | Relational → Relational | Schema evolution (v1 → v2) | `sql_v1_to_v2.smel` |
 | 4 | Document → Document | Schema evolution (v1 → v2) | `mongo_v1_to_v2.smel` |
+| 5 | Person Mini Example | MongoDB → PostgreSQL demo | `person_mongo_to_pg_minibeispiel1.smel` |
 
 ## Workflow
 
@@ -85,6 +86,9 @@ Output:
   [3] Relational -> Relational (SQL v1 -> v2)
   [4] Document -> Document (MongoDB v1 -> v2)
 
+  Mini Examples:
+  [5] Person: MongoDB -> PostgreSQL (Mini Example)
+
   [0] Exit
 
 Choice:
@@ -106,8 +110,9 @@ Opens automatically at `http://localhost:5570` with:
 ```python
 from core import run_migration
 
-# Run migration (options: 'r2d', 'd2r', 'r2r', 'd2d')
+# Run migration (options: 'r2d', 'd2r', 'r2r', 'd2d', 'person_d2r')
 result = run_migration('d2r')  # Document -> Relational
+result = run_migration('person_d2r')  # Person Mini Example
 
 # Access results
 print(result['source_type'])        # 'Document'
@@ -138,7 +143,10 @@ SMEL/
 │   ├── pg_to_mongo.smel            # Relational → Document script
 │   ├── mongo_to_pg.smel            # Document → Relational script
 │   ├── sql_v1_to_v2.smel           # SQL evolution script
-│   └── mongo_v1_to_v2.smel         # MongoDB evolution script
+│   ├── mongo_v1_to_v2.smel         # MongoDB evolution script
+│   ├── person_mongo_to_pg_minibeispiel1.smel  # Person mini example script
+│   ├── person_mongodb.json         # Person MongoDB source schema
+│   └── person_postgresql.sql       # Person PostgreSQL target schema
 ├── core.py                     # Core migration logic
 ├── main.py                     # CLI interface
 ├── web_server.py               # Web interface
@@ -175,11 +183,15 @@ USING <schema>:<version>
 | Operation | Syntax | Description |
 |-----------|--------|-------------|
 | NEST | `NEST source INTO target AS alias` | Embed entity as nested object |
-| FLATTEN | `FLATTEN entity.embedded INTO new` | Extract embedded to table |
-| UNWIND | `UNWIND entity.array AS new` | Unwind array to table |
-| ADD REFERENCE | `ADD REFERENCE entity.fk TO target` | Add foreign key reference |
+| FLATTEN | `FLATTEN entity.embedded AS new` | Extract embedded to table |
+| UNWIND | `UNWIND entity.array[] AS new` | Unwind array to table |
+| GENERATE KEY | `GENERATE KEY id AS SERIAL` | Generate integer auto-increment key |
+| GENERATE KEY | `GENERATE KEY id AS String PREFIX "x"` | Generate string key with prefix |
+| ADD REFERENCE | `ADD REFERENCE fk_name TO target` | Add foreign key reference |
 
-### Example SMEL Script
+### Example SMEL Scripts
+
+#### pain001 Migration (Complex)
 ```sql
 -- Document to Relational Migration
 MIGRATION pain001_d2r:1.0
@@ -196,6 +208,32 @@ UNWIND payment_message.payment_info[] AS payment_info
     ADD REFERENCE payment_info.msg_id TO payment_message
 ```
 
+#### Person Mini Example (Simple)
+```sql
+-- MongoDB -> PostgreSQL Mini Example
+MIGRATION person_mongo_to_pg:1.0
+FROM DOCUMENT TO RELATIONAL
+USING person_schema:1
+
+-- Flatten embedded address object
+FLATTEN person.address AS address
+    GENERATE KEY id AS String PREFIX "addr"
+    ADD REFERENCE person_id TO person
+
+-- Unwind tags array (primitive type)
+UNWIND person.tags[] AS person_tag
+    GENERATE KEY id AS String PREFIX "t"
+    ADD REFERENCE person_id TO person
+
+-- Rename _id to id
+RENAME _id TO id IN person
+```
+
+This example demonstrates:
+- `FLATTEN` with `GENERATE KEY AS String PREFIX` for embedded objects
+- `UNWIND` for primitive arrays (string[])
+- Unified string IDs with prefixes (addr001, t001, etc.)
+
 ## Sample Schema (pain001)
 
 Based on ISO 20022 pain.001 (Customer Credit Transfer Initiation):
@@ -211,4 +249,4 @@ Based on ISO 20022 pain.001 (Customer Credit Transfer Initiation):
 
 ## License
 
-This project is part of a Master's thesis at FernUniversität in Hagen.
+MIT License - See LICENSE file for details.

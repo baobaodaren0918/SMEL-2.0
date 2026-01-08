@@ -21,7 +21,8 @@ from grammar.SMELLexer import SMELLexer
 from grammar.SMELParser import SMELParser
 from grammar.SMELListener import SMELListener
 from Schema.unified_meta_schema import (
-    Database, DatabaseType, EntityType, Attribute, Key, KeyType,
+    Database, DatabaseType, EntityType, Attribute,
+    UniqueConstraint, ForeignKeyConstraint, UniqueProperty, ForeignKeyProperty, PKTypeEnum,
     Reference, Embedded, Aggregate, Cardinality, PrimitiveDataType, PrimitiveType,
     StructuralVariation, RelationshipType
 )
@@ -390,18 +391,42 @@ class SMELParserListener(SMELListener):
         return result
 
     def _parse_flatten_clauses(self, clauses) -> List[Dict]:
-        return [{"type": "ADD_REFERENCE", "ref_name": c.addReferenceClause().identifier(0).getText(),
-                 "target": c.addReferenceClause().identifier(1).getText()}
-                for c in clauses if c.addReferenceClause()]
+        result = []
+        for c in clauses:
+            if c.generateKeyClause():
+                gk = c.generateKeyClause()
+                if gk.SERIAL():
+                    result.append({"type": "GENERATE_KEY", "key_name": gk.identifier(0).getText(),
+                                   "mode": "SERIAL"})
+                elif gk.STRING():
+                    # STRING PREFIX "prefix"
+                    prefix = gk.STRING_LITERAL().getText().strip("'\"")
+                    result.append({"type": "GENERATE_KEY", "key_name": gk.identifier(0).getText(),
+                                   "mode": "STRING", "prefix": prefix})
+                elif gk.FROM():
+                    result.append({"type": "GENERATE_KEY", "key_name": gk.identifier(0).getText(),
+                                   "mode": "FROM", "from_field": gk.identifier(1).getText()})
+            elif c.addReferenceClause():
+                result.append({"type": "ADD_REFERENCE", "ref_name": c.addReferenceClause().identifier(0).getText(),
+                               "target": c.addReferenceClause().identifier(1).getText()})
+        return result
 
     def _parse_unwind_clauses(self, clauses) -> List[Dict]:
         result = []
         for c in clauses:
             if c.generateKeyClause():
                 gk = c.generateKeyClause()
-                result.append({"type": "GENERATE_KEY", "key_name": gk.identifier(0).getText(),
-                               "mode": "SERIAL" if gk.SERIAL() else "FROM",
-                               "from_field": gk.identifier(1).getText() if gk.FROM() else None})
+                if gk.SERIAL():
+                    result.append({"type": "GENERATE_KEY", "key_name": gk.identifier(0).getText(),
+                                   "mode": "SERIAL"})
+                elif gk.STRING():
+                    # STRING PREFIX "prefix"
+                    prefix = gk.STRING_LITERAL().getText().strip("'\"")
+                    result.append({"type": "GENERATE_KEY", "key_name": gk.identifier(0).getText(),
+                                   "mode": "STRING", "prefix": prefix})
+                elif gk.FROM():
+                    result.append({"type": "GENERATE_KEY", "key_name": gk.identifier(0).getText(),
+                                   "mode": "FROM", "from_field": gk.identifier(1).getText()})
             elif c.addReferenceClause():
                 result.append({"type": "ADD_REFERENCE", "ref_name": c.addReferenceClause().identifier(0).getText(),
                                "target": c.addReferenceClause().identifier(1).getText()})
@@ -443,12 +468,13 @@ class SchemaTransformer:
         "ZERO_TO_MANY": Cardinality.ZERO_TO_MANY,
     }
 
+    # Key type mapping for SMEL operations
     KEY_TYPE_MAP = {
-        "PRIMARY": KeyType.PRIMARY,
-        "UNIQUE": KeyType.UNIQUE,
-        "FOREIGN": KeyType.FOREIGN,
-        "PARTITION": KeyType.PARTITION,
-        "CLUSTERING": KeyType.CLUSTERING,
+        "PRIMARY": "primary",
+        "UNIQUE": "unique",
+        "FOREIGN": "foreign",
+        "PARTITION": PKTypeEnum.PARTITION,
+        "CLUSTERING": PKTypeEnum.CLUSTERING,
     }
 
     def __init__(self, database: Database):
@@ -476,7 +502,7 @@ class SchemaTransformer:
             return
 
         fk_attr_names = {rel.ref_name for rel in source_entity.get_references()}
-        embedded_entity = EntityType(en_name=alias)
+        embedded_entity = EntityType(object_name=[alias])
         for attr in source_entity.attributes:
             if attr.attr_name not in fk_attr_names:
                 embedded_entity.add_attribute(Attribute(attr.attr_name, attr.data_type, False, attr.is_optional))
@@ -503,31 +529,64 @@ class SchemaTransformer:
         if not parent_entity or not embedded_entity:
             return
 
-        new_entity = EntityType(en_name=target_name)
-        for attr in embedded_entity.attributes:
-            new_entity.add_attribute(Attribute(attr.attr_name, attr.data_type, attr.is_key, attr.is_optional))
+        new_entity = EntityType(object_name=[target_name])
 
-        if not new_entity.get_primary_key() and new_entity.attributes:
-            pk_attr = new_entity.attributes[0]
-            pk_attr.is_key = True
-            key = Key(key_type=KeyType.PRIMARY)
-            key.add_attribute(pk_attr)
-            new_entity.add_key(key)
+        # Check for GENERATE KEY clause
+        pk_name = "id"  # default
+        pk_mode = "SERIAL"  # default
+        pk_prefix = None
+        ref_clauses = []
+
+        for c in params.get("clauses", []):
+            if c["type"] == "GENERATE_KEY":
+                pk_name = c["key_name"]
+                pk_mode = c["mode"]
+                pk_prefix = c.get("prefix")
+            elif c["type"] == "ADD_REFERENCE":
+                ref_clauses.append(c)
+
+        # Generate primary key based on mode
+        if pk_mode == "STRING":
+            pk_type = PrimitiveDataType(PrimitiveType.STRING, max_length=255)
+        else:  # SERIAL or FROM
+            pk_type = PrimitiveDataType(PrimitiveType.INTEGER)
+
+        pk_attr = Attribute(pk_name, pk_type, True, False)
+        new_entity.add_attribute(pk_attr)
+        new_entity.add_constraint(UniqueConstraint(
+            is_primary_key=True,
+            is_managed=True,
+            unique_properties=[UniqueProperty(primary_key_type=PKTypeEnum.SIMPLE, property_id=pk_attr.meta_id)]
+        ))
+
+        # Copy attributes from embedded entity (without marking any as PK)
+        for attr in embedded_entity.attributes:
+            new_entity.add_attribute(Attribute(attr.attr_name, attr.data_type, False, attr.is_optional))
+
+        # Add FK references to the new_entity (extracted table), not parent
+        for c in ref_clauses:
+            # Get FK type from target entity's PK
+            target_entity = self.database.get_entity_type(c["target"])
+            fk_type = PrimitiveDataType(PrimitiveType.INTEGER)
+            if target_entity:
+                target_pk = target_entity.get_primary_key()
+                if target_pk and target_pk.unique_properties:
+                    pk_attr_target = target_entity.get_attribute_by_id(target_pk.unique_properties[0].property_id)
+                    if pk_attr_target:
+                        fk_type = pk_attr_target.data_type
+            new_entity.add_attribute(Attribute(c["ref_name"], fk_type, False, False))
+            new_entity.add_relationship(Reference(ref_name=c["ref_name"], refs_to=c["target"],
+                                                  cardinality=Cardinality.ONE_TO_ONE, is_optional=False))
+            self.changes.append(f"ADD_REF:{target_name}.{c['ref_name']}")
 
         self.database.add_entity_type(new_entity)
         self.changes.append(f"FLATTEN:{target_name}")
 
-        for c in params.get("clauses", []):
-            if c["type"] == "ADD_REFERENCE":
-                parent_entity.add_attribute(
-                    Attribute(c["ref_name"], PrimitiveDataType(PrimitiveType.INTEGER), False, True))
-                parent_entity.add_relationship(Reference(ref_name=c["ref_name"], refs_to=c["target"],
-                                                         cardinality=Cardinality.ONE_TO_ONE, is_optional=True))
-                self.changes.append(f"ADD_REF:{parent_name}.{c['ref_name']}")
-
         parent_entity.remove_relationship(embedded_name)
-        if target_name != embedded_name:
-            self.database.remove_entity_type(embedded_name)
+        # Remove old embedded entity using its full path
+        embedded_full_path = embedded_entity.full_path
+        if target_name != embedded_full_path:
+            self.database.remove_entity_type(embedded_full_path)
 
     def _handle_unwind(self, params: Dict) -> None:
         source_path, alias = params["source"], params["alias"]
@@ -537,53 +596,84 @@ class SchemaTransformer:
 
         parent_name, embedded_name = parts[0], parts[1].replace("[]", "")
         parent_entity = self.database.get_entity_type(parent_name)
-        embedded_entity = self.database.get_entity_type(embedded_name)
-        if not parent_entity or not embedded_entity:
+        if not parent_entity:
             return
 
-        new_entity = EntityType(en_name=alias)
+        embedded_entity = self.database.get_entity_type(embedded_name)
+
+        # Check if this is a primitive array (ListDataType attribute) instead of embedded entity
+        is_primitive_array = False
+        primitive_element_type = None
+        if not embedded_entity:
+            # Look for ListDataType attribute in parent
+            attr = parent_entity.get_attribute(embedded_name)
+            if attr and hasattr(attr.data_type, 'element_type'):
+                is_primitive_array = True
+                primitive_element_type = attr.data_type.element_type
+            else:
+                return  # Neither embedded entity nor primitive array found
+
+        new_entity = EntityType(object_name=[alias])
         pk_name, ref_clauses = None, []
 
         for c in params.get("clauses", []):
             if c["type"] == "GENERATE_KEY":
                 pk_name = c["key_name"]
-                if c["mode"] == "FROM" and c.get("from_field"):
+                pk_mode = c["mode"]
+                if pk_mode == "STRING":
+                    pk_type = PrimitiveDataType(PrimitiveType.STRING, max_length=255)
+                elif pk_mode == "FROM" and c.get("from_field") and embedded_entity:
                     src_attr = embedded_entity.get_attribute(c["from_field"])
-                    pk_type = src_attr.data_type if src_attr else PrimitiveDataType(PrimitiveType.STRING)
-                else:
+                    pk_type = src_attr.data_type if src_attr else PrimitiveDataType(PrimitiveType.INTEGER)
+                else:  # SERIAL
                     pk_type = PrimitiveDataType(PrimitiveType.INTEGER)
                 pk_attr = Attribute(pk_name, pk_type, True, False)
                 new_entity.add_attribute(pk_attr)
-                key = Key(key_type=KeyType.PRIMARY)
-                key.add_attribute(pk_attr)
-                new_entity.add_key(key)
+                constraint = UniqueConstraint(
+                    is_primary_key=True,
+                    is_managed=True,
+                    unique_properties=[UniqueProperty(primary_key_type=PKTypeEnum.SIMPLE, property_id=pk_attr.meta_id)]
+                )
+                new_entity.add_constraint(constraint)
             elif c["type"] == "ADD_REFERENCE":
                 ref_clauses.append(c)
 
-        for attr in embedded_entity.attributes:
-            if attr.attr_name != pk_name:
-                new_entity.add_attribute(Attribute(attr.attr_name, attr.data_type, False, attr.is_optional))
+        if is_primitive_array:
+            # For primitive arrays, add a 'value' column to hold array elements
+            new_entity.add_attribute(Attribute("value", primitive_element_type, False, False))
+            # Remove the array attribute from parent
+            parent_entity.remove_attribute(embedded_name)
+        else:
+            # For embedded entities, copy all attributes
+            for attr in embedded_entity.attributes:
+                if attr.attr_name != pk_name:
+                    new_entity.add_attribute(Attribute(attr.attr_name, attr.data_type, False, attr.is_optional))
 
         for c in ref_clauses:
             target_entity = self.database.get_entity_type(c["target"])
             fk_type = PrimitiveDataType(PrimitiveType.INTEGER)
             if target_entity:
                 target_pk = target_entity.get_primary_key()
-                if target_pk and target_pk.key_attributes:
-                    fk_type = target_pk.key_attributes[0].data_type
+                if target_pk and target_pk.unique_properties:
+                    pk_attr = target_entity.get_attribute_by_id(target_pk.unique_properties[0].property_id)
+                    if pk_attr:
+                        fk_type = pk_attr.data_type
             new_entity.add_attribute(Attribute(c["ref_name"], fk_type, False, False))
             new_entity.add_relationship(Reference(ref_name=c["ref_name"], refs_to=c["target"],
                                                   cardinality=Cardinality.ONE_TO_ONE, is_optional=False))
             self.changes.append(f"ADD_REF:{alias}.{c['ref_name']}")
 
-        for rel in embedded_entity.relationships:
-            new_entity.add_relationship(copy.deepcopy(rel))
+        if embedded_entity:
+            for rel in embedded_entity.relationships:
+                new_entity.add_relationship(copy.deepcopy(rel))
 
         self.database.add_entity_type(new_entity)
         self.changes.append(f"UNWIND:{alias}")
-        parent_entity.remove_relationship(embedded_name)
-        if alias != embedded_name:
-            self.database.remove_entity_type(embedded_name)
+
+        if not is_primitive_array:
+            parent_entity.remove_relationship(embedded_name)
+            if alias != embedded_name:
+                self.database.remove_entity_type(embedded_name)
 
     def _handle_delete_reference(self, params: Dict) -> None:
         parts = params["reference"].split(".")
@@ -636,7 +726,7 @@ class SchemaTransformer:
                     "LONG": PrimitiveType.LONG, "DOUBLE": PrimitiveType.DOUBLE,
                     "FLOAT": PrimitiveType.FLOAT, "DECIMAL": PrimitiveType.DECIMAL,
                     "BOOLEAN": PrimitiveType.BOOLEAN, "DATE": PrimitiveType.DATE,
-                    "DATETIME": PrimitiveType.DATETIME, "TIMESTAMP": PrimitiveType.TIMESTAMP,
+                    "TIMESTAMP": PrimitiveType.TIMESTAMP,
                     "UUID": PrimitiveType.UUID, "BINARY": PrimitiveType.BINARY
                 }
                 data_type = PrimitiveDataType(type_map.get(type_str, PrimitiveType.STRING))
@@ -670,7 +760,7 @@ class SchemaTransformer:
         name = params["name"]
         clauses = params.get("clauses", [])
 
-        new_entity = EntityType(en_name=name)
+        new_entity = EntityType(object_name=[name])
 
         # Process clauses for attributes and key
         key_name = None
@@ -687,9 +777,12 @@ class SchemaTransformer:
             if attr:
                 attr.is_key = True
                 attr.is_optional = False
-                key = Key(key_type=KeyType.PRIMARY)
-                key.add_attribute(attr)
-                new_entity.add_key(key)
+                constraint = UniqueConstraint(
+                    is_primary_key=True,
+                    is_managed=True,
+                    unique_properties=[UniqueProperty(primary_key_type=PKTypeEnum.SIMPLE, property_id=attr.meta_id)]
+                )
+                new_entity.add_constraint(constraint)
 
         self.database.add_entity_type(new_entity)
         self.changes.append(f"ADD_ENTITY:{name}")
@@ -713,7 +806,7 @@ class SchemaTransformer:
     def _handle_add_key(self, params: Dict) -> None:
         entity_name = params.get("entity")
         key_name = params["key_name"]
-        key_type = self.KEY_TYPE_MAP.get(params["key_type"], KeyType.PRIMARY)
+        key_type_str = self.KEY_TYPE_MAP.get(params["key_type"], "primary")
 
         entity = self.database.get_entity_type(entity_name) if entity_name else None
         if not entity:
@@ -726,39 +819,103 @@ class SchemaTransformer:
         else:
             attr.is_key = True
 
-        key = Key(key_type=key_type)
-        key.add_attribute(attr)
+        # Determine PKTypeEnum for partition/clustering keys
+        pk_type_enum = PKTypeEnum.SIMPLE
+        if isinstance(key_type_str, PKTypeEnum):
+            pk_type_enum = key_type_str
+            key_type_str = "primary"  # Partition/Clustering are variants of primary key
 
-        for c in params.get("clauses", []):
-            if c["type"] == "REFERENCES" and key_type == KeyType.FOREIGN:
-                key.referenced_entity = c["target"]
-                key.referenced_attributes = c["columns"]
-            elif c["type"] == "COLUMNS":
-                for col_name in c["columns"]:
-                    col_attr = entity.get_attribute(col_name)
-                    if col_attr and col_attr not in key.key_attributes:
-                        key.add_attribute(col_attr)
+        if key_type_str == "foreign":
+            # Create ForeignKeyConstraint
+            fk_props = []
+            ref_entity_name = None
+            ref_attrs = []
+            for c in params.get("clauses", []):
+                if c["type"] == "REFERENCES":
+                    ref_entity_name = c["target"]
+                    ref_attrs = c["columns"]
+                elif c["type"] == "COLUMNS":
+                    for col_name in c["columns"]:
+                        col_attr = entity.get_attribute(col_name)
+                        if col_attr:
+                            # Get target UniqueProperty meta_id if possible
+                            target_up_id = self._get_target_unique_property_id(ref_entity_name, ref_attrs[0] if ref_attrs else "")
+                            fk_props.append(ForeignKeyProperty(
+                                property_id=col_attr.meta_id,
+                                points_to_unique_property_id=target_up_id
+                            ))
+            if not fk_props:
+                target_up_id = self._get_target_unique_property_id(ref_entity_name, ref_attrs[0] if ref_attrs else "")
+                fk_props.append(ForeignKeyProperty(
+                    property_id=attr.meta_id,
+                    points_to_unique_property_id=target_up_id
+                ))
+            constraint = ForeignKeyConstraint(is_managed=True, foreign_key_properties=fk_props)
+        else:
+            # Create UniqueConstraint (primary or unique)
+            unique_props = [UniqueProperty(primary_key_type=pk_type_enum, property_id=attr.meta_id)]
+            for c in params.get("clauses", []):
+                if c["type"] == "COLUMNS":
+                    for col_name in c["columns"]:
+                        col_attr = entity.get_attribute(col_name)
+                        if col_attr and col_attr != attr:
+                            unique_props.append(UniqueProperty(primary_key_type=pk_type_enum, property_id=col_attr.meta_id))
+            constraint = UniqueConstraint(
+                is_primary_key=(key_type_str == "primary"),
+                is_managed=True,
+                unique_properties=unique_props
+            )
 
-        entity.add_key(key)
+        entity.add_constraint(constraint)
         self.changes.append(f"ADD_KEY:{entity_name}.{key_name}")
+
+    def _get_target_unique_property_id(self, target_entity_name: str, target_attr_name: str) -> str:
+        """Get the UniqueProperty meta_id for a target entity's attribute (for FK references)."""
+        if not target_entity_name:
+            return ""
+        target_entity = self.database.get_entity_type(target_entity_name)
+        if not target_entity:
+            return ""
+        target_pk = target_entity.get_primary_key()
+        if not target_pk or not target_pk.unique_properties:
+            return ""
+        # If target_attr_name is specified, find matching UniqueProperty
+        if target_attr_name:
+            for up in target_pk.unique_properties:
+                attr = target_entity.get_attribute_by_id(up.property_id)
+                if attr and attr.attr_name == target_attr_name:
+                    return up.meta_id
+        # Default to first UniqueProperty
+        return target_pk.unique_properties[0].meta_id
 
     def _handle_drop_key(self, params: Dict) -> None:
         entity_name = params.get("entity")
         key_name = params["key_name"]
-        key_type = self.KEY_TYPE_MAP.get(params["key_type"], KeyType.PRIMARY)
+        key_type_str = self.KEY_TYPE_MAP.get(params["key_type"], "primary")
 
         entity = self.database.get_entity_type(entity_name) if entity_name else None
         if not entity:
             return
 
-        for key in list(entity.keys):
-            if key.key_type == key_type:
-                for attr in key.key_attributes:
-                    if attr.attr_name == key_name:
-                        entity.keys.remove(key)
-                        attr.is_key = False
+        for constraint in list(entity.constraints):
+            if key_type_str == "foreign" and isinstance(constraint, ForeignKeyConstraint):
+                for fk_prop in constraint.foreign_key_properties:
+                    fk_attr = entity.get_attribute_by_id(fk_prop.property_id)
+                    if fk_attr and fk_attr.attr_name == key_name:
+                        entity.constraints.remove(constraint)
+                        fk_attr.is_key = False
                         self.changes.append(f"DROP_KEY:{entity_name}.{key_name}")
                         return
+            elif key_type_str in ("primary", "unique") and isinstance(constraint, UniqueConstraint):
+                is_primary = (key_type_str == "primary")
+                if constraint.is_primary_key == is_primary:
+                    for up in constraint.unique_properties:
+                        up_attr = entity.get_attribute_by_id(up.property_id)
+                        if up_attr and up_attr.attr_name == key_name:
+                            entity.constraints.remove(constraint)
+                            up_attr.is_key = False
+                            self.changes.append(f"DROP_KEY:{entity_name}.{key_name}")
+                            return
 
     def _handle_add_variation(self, params: Dict) -> None:
         entity_name = params["entity"]
@@ -834,11 +991,11 @@ class SchemaTransformer:
             return
 
         # Create new standalone entity
-        new_entity = EntityType(en_name=alias)
+        new_entity = EntityType(object_name=[alias])
         for attr in embedded_entity.attributes:
             new_entity.add_attribute(Attribute(attr.attr_name, attr.data_type, attr.is_key, attr.is_optional))
-        for key in embedded_entity.keys:
-            new_entity.add_key(copy.deepcopy(key))
+        for constraint in embedded_entity.constraints:
+            new_entity.add_constraint(copy.deepcopy(constraint))
 
         self.database.add_entity_type(new_entity)
 
@@ -847,7 +1004,11 @@ class SchemaTransformer:
 
         # Add reference from parent to new entity
         pk = new_entity.get_primary_key()
-        fk_type = pk.key_attributes[0].data_type if pk and pk.key_attributes else PrimitiveDataType(PrimitiveType.INTEGER)
+        fk_type = PrimitiveDataType(PrimitiveType.INTEGER)
+        if pk and pk.unique_properties:
+            pk_attr = new_entity.get_attribute_by_id(pk.unique_properties[0].property_id)
+            if pk_attr:
+                fk_type = pk_attr.data_type
         fk_name = f"{alias}_id"
         parent_entity.add_attribute(Attribute(fk_name, fk_type, False, True))
         parent_entity.add_relationship(Reference(ref_name=fk_name, refs_to=alias,
@@ -874,7 +1035,8 @@ class SchemaTransformer:
             entity = self.database.get_entity_type(old_name)
             if entity:
                 self.database.remove_entity_type(old_name)
-                entity.en_name = new_name
+                # Update object_name: keep parent path, change last element
+                entity.object_name = entity.parent_path + [new_name]
                 self.database.add_entity_type(entity)
                 self.changes.append(f"RENAME:{old_name}->{new_name}")
 
@@ -886,7 +1048,8 @@ class SchemaTransformer:
         entity = self.database.get_entity_type(old_name)
         if entity:
             self.database.remove_entity_type(old_name)
-            entity.en_name = new_name
+            # Update object_name: keep parent path, change last element
+            entity.object_name = entity.parent_path + [new_name]
             self.database.add_entity_type(entity)
             self.changes.append(f"RENAME_ENTITY:{old_name}->{new_name}")
 
@@ -913,7 +1076,8 @@ class SchemaTransformer:
             src_entity = self.database.get_entity_type(source_parts[0])
             if src_entity:
                 new_entity = copy.deepcopy(src_entity)
-                new_entity.en_name = target_parts[0]
+                # Update object_name with new target name
+                new_entity.object_name = [target_parts[0]]
                 self.database.add_entity_type(new_entity)
                 self.changes.append(f"COPY:{source_path}->{target_path}")
 
@@ -951,7 +1115,7 @@ class SchemaTransformer:
             return
 
         # Create new entity with combined attributes
-        new_entity = EntityType(en_name=target_name)
+        new_entity = EntityType(object_name=[target_name])
 
         # Add attributes from source1
         for attr in source1.attributes:
@@ -966,7 +1130,7 @@ class SchemaTransformer:
         # Copy primary key from source1
         pk = source1.get_primary_key()
         if pk:
-            new_entity.add_key(copy.deepcopy(pk))
+            new_entity.add_constraint(copy.deepcopy(pk))
 
         self.database.add_entity_type(new_entity)
 
@@ -993,15 +1157,15 @@ class SchemaTransformer:
         mid = len(attrs) // 2
 
         # Target1 gets first half (including PK)
-        entity1 = EntityType(en_name=target1_name)
+        entity1 = EntityType(object_name=[target1_name])
         for attr in attrs[:mid] if mid > 0 else attrs[:1]:
             entity1.add_attribute(Attribute(attr.attr_name, attr.data_type, attr.is_key, attr.is_optional))
         pk = source.get_primary_key()
         if pk:
-            entity1.add_key(copy.deepcopy(pk))
+            entity1.add_constraint(copy.deepcopy(pk))
 
         # Target2 gets second half
-        entity2 = EntityType(en_name=target2_name)
+        entity2 = EntityType(object_name=[target2_name])
         for attr in attrs[mid:] if mid > 0 else attrs[1:]:
             entity2.add_attribute(Attribute(attr.attr_name, attr.data_type, False, attr.is_optional))
 
@@ -1035,7 +1199,7 @@ class SchemaTransformer:
                     "LONG": PrimitiveType.LONG, "DOUBLE": PrimitiveType.DOUBLE,
                     "FLOAT": PrimitiveType.FLOAT, "DECIMAL": PrimitiveType.DECIMAL,
                     "BOOLEAN": PrimitiveType.BOOLEAN, "DATE": PrimitiveType.DATE,
-                    "DATETIME": PrimitiveType.DATETIME, "TIMESTAMP": PrimitiveType.TIMESTAMP,
+                    "TIMESTAMP": PrimitiveType.TIMESTAMP,
                     "UUID": PrimitiveType.UUID, "BINARY": PrimitiveType.BINARY
                 }
                 data_type = PrimitiveDataType(type_map.get(type_str, PrimitiveType.STRING))
@@ -1051,7 +1215,7 @@ class SchemaTransformer:
                 self.changes.append(f"ADD_ATTR:{entity_name}.{name}")
 
         elif feature_type == "ENTITY":
-            new_entity = EntityType(en_name=name)
+            new_entity = EntityType(object_name=[name])
             self.database.add_entity_type(new_entity)
             self.changes.append(f"ADD_ENTITY:{name}")
 
@@ -1124,7 +1288,7 @@ class SchemaTransformer:
             "LONG": PrimitiveType.LONG, "DOUBLE": PrimitiveType.DOUBLE,
             "FLOAT": PrimitiveType.FLOAT, "DECIMAL": PrimitiveType.DECIMAL,
             "BOOLEAN": PrimitiveType.BOOLEAN, "DATE": PrimitiveType.DATE,
-            "DATETIME": PrimitiveType.DATETIME, "TIMESTAMP": PrimitiveType.TIMESTAMP,
+            "TIMESTAMP": PrimitiveType.TIMESTAMP,
             "UUID": PrimitiveType.UUID, "BINARY": PrimitiveType.BINARY
         }
         new_type = type_map.get(new_type_str, PrimitiveType.STRING)
@@ -1164,7 +1328,7 @@ class SchemaTransformer:
             return
 
         # Create new entity with extracted attributes
-        new_entity = EntityType(en_name=target_name)
+        new_entity = EntityType(object_name=[target_name])
 
         # Process clauses for key generation
         pk_name = None
@@ -1175,9 +1339,12 @@ class SchemaTransformer:
                 pk_type = PrimitiveDataType(PrimitiveType.INTEGER)
                 pk_attr = Attribute(pk_name, pk_type, True, False)
                 new_entity.add_attribute(pk_attr)
-                key = Key(key_type=KeyType.PRIMARY)
-                key.add_attribute(pk_attr)
-                new_entity.add_key(key)
+                constraint = UniqueConstraint(
+                    is_primary_key=True,
+                    is_managed=True,
+                    unique_properties=[UniqueProperty(primary_key_type=PKTypeEnum.SIMPLE, property_id=pk_attr.meta_id)]
+                )
+                new_entity.add_constraint(constraint)
             elif c["type"] == "ADD_REFERENCE":
                 ref_clauses.append(c)
 
@@ -1330,7 +1497,6 @@ PG_REVERSE_TYPE_MAP = {
     PrimitiveType.DOUBLE: 'DOUBLE PRECISION',
     PrimitiveType.BOOLEAN: 'BOOLEAN',
     PrimitiveType.DATE: 'DATE',
-    PrimitiveType.DATETIME: 'TIMESTAMP',
     PrimitiveType.TIMESTAMP: 'TIMESTAMP',
     PrimitiveType.UUID: 'UUID',
     PrimitiveType.BINARY: 'BYTEA',
@@ -1345,7 +1511,6 @@ MONGO_REVERSE_TYPE_MAP = {
     PrimitiveType.FLOAT: 'double',
     PrimitiveType.BOOLEAN: 'bool',
     PrimitiveType.DATE: 'date',
-    PrimitiveType.DATETIME: 'timestamp',
     PrimitiveType.TIMESTAMP: 'timestamp',
     PrimitiveType.UUID: 'string',
     PrimitiveType.BINARY: 'binData',
@@ -1538,6 +1703,12 @@ def run_migration(direction: str) -> Dict[str, Any]:
         source_type, target_type = "Document", "Document"
         source_adapter = MongoDBAdapter
         target_adapter = MongoDBAdapter
+    elif direction == "person_d2r":
+        source_file = TESTS_DIR / "person_mongodb.json"
+        smel_file = TESTS_DIR / "person_mongo_to_pg_minibeispiel1.smel"
+        source_type, target_type = "Document", "Relational"
+        source_adapter = MongoDBAdapter
+        target_adapter = PostgreSQLAdapter
     else:
         return {"error": f"Unknown direction: {direction}"}
 

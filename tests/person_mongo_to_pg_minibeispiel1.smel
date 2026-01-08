@@ -1,0 +1,54 @@
+-- SMEL Mini-Example: MongoDB -> PostgreSQL
+-- Person Document (nested address + tags array) -> 3 Normalized Tables
+-- Direction: Denormalized (Embedded) -> Normalized (3NF)
+
+MIGRATION person_mongo_to_pg:1.0
+FROM DOCUMENT TO RELATIONAL
+USING person_schema:1
+
+-- ============================================
+-- Source: MongoDB Person Document
+-- ============================================
+-- {
+--   _id: "p001",
+--   name: "Zhang San",
+--   address: {
+--     street: "Hauptstrasse 10",
+--     city: "Berlin"
+--   },
+--   tags: ["student", "developer"]
+-- }
+
+-- ============================================
+-- Target: PostgreSQL 3NF Tables
+-- ============================================
+-- person (id, name)                           -- id: VARCHAR (from MongoDB _id)
+-- address (id, street, city, person_id)       -- id: VARCHAR with prefix "addr" (addr001, addr002...)
+-- person_tag (id, value, person_id)           -- id: VARCHAR with prefix "t" (t001, t002...)
+
+-- ============================================
+-- Step 1: FLATTEN nested object -> independent table
+-- ============================================
+-- Extracts embedded 'address' document into separate 'address' table
+-- Generates string ID with "addr" prefix (addr001, addr002...)
+-- Adds foreign key 'person_id' referencing person table
+
+FLATTEN person.address AS address
+    GENERATE KEY id AS String PREFIX "addr"
+    ADD REFERENCE person_id TO person
+
+-- ============================================
+-- Step 2: UNWIND array -> independent table
+-- ============================================
+-- Expands 'tags' array into separate 'person_tag' table
+-- Each array element becomes a row with string ID prefix "t" (t001, t002...)
+
+UNWIND person.tags[] AS person_tag
+    GENERATE KEY id AS String PREFIX "t"
+    ADD REFERENCE person_id TO person
+
+-- ============================================
+-- Step 3: RENAME _id -> id (PostgreSQL naming convention)
+-- ============================================
+
+RENAME _id TO id IN person
