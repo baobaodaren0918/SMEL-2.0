@@ -1,6 +1,6 @@
-# Claude Code configuration
-.claude/
-tmpclaude-*/
+# Local tool configuration
+.*/
+tmp*/
 
 # Temp/test files
 nul
