@@ -10,7 +10,7 @@ from Schema.unified_meta_schema import Database, DatabaseType, EntityType, Refer
 from Schema.adapters import PostgreSQLAdapter, MongoDBAdapter
 from core import (
     SCHEMA_DIR, TESTS_DIR, EQUIVALENT_ATTRS,
-    parse_smel, SchemaTransformer
+    SchemaTransformer
 )
 
 # ANSI Colors
@@ -263,8 +263,9 @@ def main():
     print(f"\n  {CYAN}Schema Evolution (Same Model):{RESET}")
     print("  [3] Relational -> Relational (SQL v1 -> v2)")
     print("  [4] Document -> Document (MongoDB v1 -> v2)")
-    print(f"\n  {CYAN}Mini Examples:{RESET}")
-    print("  [5] Person: MongoDB -> PostgreSQL (Mini Example)")
+    print(f"\n  {CYAN}Grammar Variants:{RESET}")
+    print("  [6] Person: MongoDB -> PostgreSQL (Specific Operations)")
+    print("  [7] Person: MongoDB -> PostgreSQL (Pauschalisiert Operations)")
     print("\n  [0] Exit")
 
     try:
@@ -274,7 +275,7 @@ def main():
 
     if choice == "0":
         return 0
-    if choice not in ("1", "2", "3", "4", "5"):
+    if choice not in ("1", "2", "3", "4", "6", "7"):
         print("Invalid choice")
         return 1
 
@@ -307,10 +308,19 @@ def main():
         source_type, target_type = "Document", "Document"
         source_adapter = MongoDBAdapter
         target_adapter = MongoDBAdapter
-    else:  # choice == "5"
+    elif choice == "6":
+        # Specific Operations version
         source_file = TESTS_DIR / "person_mongodb.json"
         target_file = TESTS_DIR / "person_postgresql.sql"
-        smel_file = TESTS_DIR / "person_mongo_to_pg_minibeispiel1.smel"
+        smel_file = TESTS_DIR / "specific" / "person_mongo_to_pg_minibeispiel.smel"
+        source_type, target_type = "Document", "Relational"
+        source_adapter = MongoDBAdapter
+        target_adapter = PostgreSQLAdapter
+    else:  # choice == "7"
+        # Pauschalisiert Operations version
+        source_file = TESTS_DIR / "person_mongodb.json"
+        target_file = TESTS_DIR / "person_postgresql.sql"
+        smel_file = TESTS_DIR / "pauschalisiert" / "person_mongo_to_pg_minibeispiel.smel_ps"
         source_type, target_type = "Document", "Relational"
         source_adapter = MongoDBAdapter
         target_adapter = PostgreSQLAdapter
@@ -329,15 +339,47 @@ def main():
 
     # Step 2: Transformation
     print(f"\n{CYAN}[Step 2] Transformation: Meta V1 + {smel_file.name} -> Meta V2{RESET}")
-    context, operations, errors = parse_smel(smel_file)
+
+    # Parse SMEL file (auto-detects grammar from file extension)
+    from parser_factory import parse_smel_auto
+    context, operations, errors = parse_smel_auto(str(smel_file))
+
     if errors:
         print(f"{RED}[ERROR] Parse errors: {errors}{RESET}")
         return 1
 
+    # Execute operations with status tracking
     transformer = SchemaTransformer(source_db)
-    result_db = transformer.execute(operations)
+    success_count = 0
+    skipped_count = 0
+
+    for i, op in enumerate(operations):
+        prev_changes_len = len(transformer.changes)
+        handler = getattr(transformer, f"_handle_{op.op_type.lower()}", None)
+        if handler:
+            handler(op.params)
+        new_changes_len = len(transformer.changes)
+
+        # Get operation keyword for display
+        keyword = op.original_keyword if hasattr(op, 'original_keyword') and op.original_keyword else op.op_type
+
+        # Check if operation was executed (new change recorded)
+        if new_changes_len > prev_changes_len:
+            print(f"         {GREEN}[OK]{RESET} {keyword}")
+            success_count += 1
+        else:
+            print(f"         {YELLOW}[SKIP]{RESET} {keyword} (no effect)")
+            skipped_count += 1
+
+    result_db = transformer.database
     result_db.db_type = DatabaseType.DOCUMENT if target_type == "Document" else DatabaseType.RELATIONAL
-    print(f"         Applied {len(operations)} operations, result has {len(result_db.entity_types)} entities")
+
+    # Print execution summary
+    if skipped_count == 0:
+        print(f"         {GREEN}{BOLD}All {success_count} operations executed successfully{RESET}")
+    else:
+        print(f"         {YELLOW}Executed: {success_count}, Skipped: {skipped_count}{RESET}")
+    print(f"         Result has {len(result_db.entity_types)} entities")
 
     # Step 3: Forward Engineering
     print(f"\n{CYAN}[Step 3] Forward Engineering: Meta V2 -> Generated {target_type} DDL{RESET}")

@@ -2,10 +2,11 @@
 SMEL Core - Shared logic for Schema Migration & Evolution Language
 
 This module contains the core components shared by main.py (CLI) and web_server.py (Web UI):
-- SMELParserListener: Parse SMEL files
 - SchemaTransformer: Execute transformation operations
-- parse_smel(): Parse SMEL file and return operations
 - db_to_dict(): Convert Database to JSON-serializable dict
+
+Note: For parsing SMEL files, use parser_factory.parse_smel_auto() which supports
+both SMEL_Specific (.smel) and SMEL_Pauschalisiert (.smel_ps) grammars.
 """
 import sys
 import copy
@@ -17,9 +18,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from antlr4 import FileStream, CommonTokenStream, ParseTreeWalker
 from antlr4.error.ErrorListener import ErrorListener
-from grammar.SMELLexer import SMELLexer
-from grammar.SMELParser import SMELParser
-from grammar.SMELListener import SMELListener
 from Schema.unified_meta_schema import (
     Database, DatabaseType, EntityType, Attribute,
     UniqueConstraint, ForeignKeyConstraint, UniqueProperty, ForeignKeyProperty, PKTypeEnum,
@@ -56,405 +54,6 @@ class SyntaxErrorListener(ErrorListener):
         self.errors.append(f"Line {line}:{column} - {msg}")
 
 
-class SMELParserListener(SMELListener):
-    """Parse SMEL file and extract operations."""
-
-    def __init__(self):
-        self.context = MigrationContext()
-        self.operations: List[Operation] = []
-
-    def enterMigrationDecl(self, ctx):
-        self.context.name = ctx.identifier().getText()
-        self.context.version = ctx.version().getText()
-
-    def enterFromToDecl(self, ctx):
-        self.context.source_db_type = ctx.databaseType(0).getText()
-        self.context.target_db_type = ctx.databaseType(1).getText()
-
-    def enterNest(self, ctx):
-        self.operations.append(Operation("NEST", {
-            "source": ctx.identifier(0).getText(),
-            "target": ctx.identifier(1).getText(),
-            "alias": ctx.identifier(2).getText(),
-            "clauses": self._parse_nest_clauses(ctx.nestClause())
-        }))
-
-    def enterFlatten(self, ctx):
-        """
-        Unified FLATTEN operation - handles embedded objects, value arrays, and reference arrays.
-        The handler (_handle_flatten) auto-detects the source type and creates appropriate output.
-        """
-        self.operations.append(Operation("FLATTEN", {
-            "source": ctx.qualifiedName().getText(),
-            "target": ctx.identifier().getText(),
-            "clauses": self._parse_flatten_clauses(ctx.flattenClause())
-        }))
-
-    # ========== ADD sub-rule handlers (Orion-style branching) ==========
-
-    def enterAttributeAdd(self, ctx):
-        """ADD ATTRIBUTE email TO Customer WITH TYPE String NOT NULL"""
-        clauses = self._parse_attribute_clauses(ctx.attributeClause())
-        self.operations.append(Operation("ADD_ATTRIBUTE", {
-            "name": ctx.identifier(0).getText(),
-            "entity": ctx.identifier(1).getText() if len(ctx.identifier()) > 1 else None,
-            "clauses": clauses
-        }))
-
-    def enterReferenceAdd(self, ctx):
-        """ADD REFERENCE customer_id TO Order WITH CARDINALITY ONE_TO_MANY"""
-        clauses = self._parse_reference_clauses(ctx.referenceClause())
-        self.operations.append(Operation("ADD_REFERENCE", {
-            "reference": ctx.qualifiedName().getText(),
-            "target": ctx.identifier().getText(),
-            "clauses": clauses
-        }))
-
-    def enterEmbeddedAdd(self, ctx):
-        """ADD EMBEDDED address TO Customer WITH CARDINALITY ONE_TO_ONE"""
-        clauses = self._parse_embedded_clauses(ctx.embeddedClause())
-        self.operations.append(Operation("ADD_EMBEDDED", {
-            "name": ctx.identifier(0).getText(),
-            "entity": ctx.identifier(1).getText(),
-            "clauses": clauses
-        }))
-
-    def enterEntityAdd(self, ctx):
-        """ADD ENTITY Product WITH ATTRIBUTES (id, name)"""
-        clauses = self._parse_entity_clauses(ctx.entityClause())
-        self.operations.append(Operation("ADD_ENTITY", {
-            "name": ctx.identifier().getText(),
-            "clauses": clauses
-        }))
-
-    # ========== DELETE sub-rule handlers (Orion-style branching) ==========
-
-    def enterAttributeDelete(self, ctx):
-        """DELETE ATTRIBUTE Customer.email"""
-        self.operations.append(Operation("DELETE_ATTRIBUTE", {
-            "target": ctx.qualifiedName().getText()
-        }))
-
-    def enterReferenceDelete(self, ctx):
-        """DELETE REFERENCE Customer.order_id"""
-        self.operations.append(Operation("DELETE_REFERENCE", {
-            "reference": ctx.qualifiedName().getText()
-        }))
-
-    def enterEmbeddedDelete(self, ctx):
-        """DELETE EMBEDDED Customer.address"""
-        self.operations.append(Operation("DELETE_EMBEDDED", {
-            "embedded": ctx.qualifiedName().getText()
-        }))
-
-    def enterEntityDelete(self, ctx):
-        """DELETE ENTITY Customer"""
-        self.operations.append(Operation("DELETE_ENTITY", {
-            "name": ctx.identifier().getText()
-        }))
-
-    # ========== ADD sub-rule handlers for key, variation, relType ==========
-
-    def enterKeyAdd(self, ctx):
-        """ADD PRIMARY KEY id TO Customer OR ADD PRIMARY KEY (id1, id2) TO Customer"""
-        key_columns = self._parse_key_columns(ctx.keyColumns())
-        self.operations.append(Operation("ADD_KEY", {
-            "key_type": ctx.keyType().getText(),
-            "key_columns": key_columns,  # List of column names
-            "entity": ctx.identifier().getText() if ctx.identifier() else None,
-            "clauses": self._parse_key_clauses(ctx.keyClause())
-        }))
-
-    def enterVariationAdd(self, ctx):
-        """ADD VARIATION v1 TO Customer WITH ATTRIBUTES (a, b)"""
-        self.operations.append(Operation("ADD_VARIATION", {
-            "variation_id": ctx.identifier(0).getText(),
-            "entity": ctx.identifier(1).getText(),
-            "clauses": self._parse_variation_clauses(ctx.variationClause())
-        }))
-
-    def enterRelTypeAdd(self, ctx):
-        """ADD RELTYPE ACTED_IN FROM Actor TO Movie"""
-        clauses = self._parse_reltype_clauses(ctx.relTypeClause())
-        self.operations.append(Operation("ADD_RELTYPE", {
-            "name": ctx.identifier(0).getText(),
-            "source": ctx.identifier(1).getText(),
-            "target": ctx.identifier(2).getText(),
-            "clauses": clauses
-        }))
-
-    # ========== DROP sub-rule handlers ==========
-
-    def enterKeyDrop(self, ctx):
-        """DROP PRIMARY KEY id FROM Customer OR DROP PRIMARY KEY (id1, id2) FROM Customer"""
-        key_columns = self._parse_key_columns(ctx.keyColumns())
-        self.operations.append(Operation("DROP_KEY", {
-            "key_type": ctx.keyType().getText(),
-            "key_columns": key_columns,  # List of column names
-            "entity": ctx.identifier().getText() if ctx.identifier() else None
-        }))
-
-    def enterVariationDrop(self, ctx):
-        """DROP VARIATION v1 FROM Customer"""
-        self.operations.append(Operation("DROP_VARIATION", {
-            "variation_id": ctx.identifier(0).getText(),
-            "entity": ctx.identifier(1).getText()
-        }))
-
-    def enterRelTypeDrop(self, ctx):
-        """DROP RELTYPE ACTED_IN"""
-        self.operations.append(Operation("DROP_RELTYPE", {
-            "name": ctx.identifier().getText()
-        }))
-
-    def enterUnnest(self, ctx):
-        """UNNEST embedded FROM Parent [AS alias]"""
-        clauses = []
-        for c in ctx.unnestClause():
-            if c.AS():
-                clauses.append({"type": "AS", "alias": c.identifier().getText()})
-            elif c.usingKeyClause():
-                clauses.append({"type": "USING_KEY", "value": c.usingKeyClause().identifier().getText()})
-        self.operations.append(Operation("UNNEST", {
-            "embedded": ctx.identifier(0).getText(),
-            "parent": ctx.identifier(1).getText(),
-            "clauses": clauses
-        }))
-
-    # ========== RENAME sub-rule handlers ==========
-
-    def enterFeatureRename(self, ctx):
-        """RENAME oldName TO newName [IN Entity]"""
-        self.operations.append(Operation("RENAME", {
-            "old_name": ctx.identifier(0).getText(),
-            "new_name": ctx.identifier(1).getText(),
-            "entity": ctx.identifier(2).getText() if len(ctx.identifier()) > 2 else None
-        }))
-
-    def enterEntityRename(self, ctx):
-        """RENAME ENTITY OldName TO NewName"""
-        self.operations.append(Operation("RENAME_ENTITY", {
-            "old_name": ctx.identifier(0).getText(),
-            "new_name": ctx.identifier(1).getText()
-        }))
-
-    def enterRelTypeRename(self, ctx):
-        """RENAME RELTYPE oldName TO newName"""
-        self.operations.append(Operation("RENAME_RELTYPE", {
-            "old_name": ctx.identifier(0).getText(),
-            "new_name": ctx.identifier(1).getText()
-        }))
-
-    def enterCopy(self, ctx):
-        """COPY source TO target"""
-        self.operations.append(Operation("COPY", {
-            "source": ctx.qualifiedName(0).getText(),
-            "target": ctx.qualifiedName(1).getText()
-        }))
-
-    def enterMove(self, ctx):
-        """MOVE source TO target"""
-        self.operations.append(Operation("MOVE", {
-            "source": ctx.qualifiedName(0).getText(),
-            "target": ctx.qualifiedName(1).getText()
-        }))
-
-    def enterMerge(self, ctx):
-        """MERGE A, B INTO C [AS alias]"""
-        self.operations.append(Operation("MERGE", {
-            "source1": ctx.identifier(0).getText(),
-            "source2": ctx.identifier(1).getText(),
-            "target": ctx.identifier(2).getText(),
-            "alias": ctx.identifier(3).getText() if len(ctx.identifier()) > 3 else None
-        }))
-
-    def enterSplit(self, ctx):
-        """SPLIT source INTO A, B"""
-        self.operations.append(Operation("SPLIT", {
-            "source": ctx.identifier(0).getText(),
-            "target1": ctx.identifier(1).getText(),
-            "target2": ctx.identifier(2).getText()
-        }))
-
-
-    def enterCast(self, ctx):
-        """CAST Entity.field TO dataType"""
-        self.operations.append(Operation("CAST", {
-            "target": ctx.qualifiedName().getText(),
-            "data_type": ctx.dataType().getText()
-        }))
-
-    def enterLinking(self, ctx):
-        """LINKING source TO target"""
-        self.operations.append(Operation("LINKING", {
-            "source": ctx.qualifiedName().getText(),
-            "target": ctx.identifier().getText()
-        }))
-
-    def enterExtract(self, ctx):
-        """EXTRACT (a,b,c) FROM Entity INTO NewEntity [clauses]"""
-        attrs = [id.getText() for id in ctx.identifierList().identifier()]
-        clauses = self._parse_extract_clauses(ctx.extractClause())
-        self.operations.append(Operation("EXTRACT", {
-            "attributes": attrs,
-            "source": ctx.identifier(0).getText(),
-            "target": ctx.identifier(1).getText(),
-            "clauses": clauses
-        }))
-
-
-    def _parse_attribute_clauses(self, clauses) -> List[Dict]:
-        """Parse attributeClause: withTypeClause | withDefaultClause | notNullClause."""
-        result = []
-        for c in clauses:
-            if c.withTypeClause():
-                result.append({"type": "TYPE", "data_type": c.withTypeClause().dataType().getText()})
-            elif c.withDefaultClause():
-                result.append({"type": "DEFAULT", "value": c.withDefaultClause().literal().getText()})
-            elif c.notNullClause():
-                result.append({"type": "NOT_NULL"})
-        return result
-
-    def _parse_reference_clauses(self, clauses) -> List[Dict]:
-        """Parse referenceClause: withCardinalityClause | usingKeyClause | whereClause."""
-        result = []
-        for c in clauses:
-            if c.withCardinalityClause():
-                result.append({"type": "CARDINALITY", "value": c.withCardinalityClause().cardinalityType().getText()})
-            elif c.usingKeyClause():
-                result.append({"type": "USING_KEY", "value": c.usingKeyClause().identifier().getText()})
-            elif c.whereClause():
-                result.append({"type": "WHERE", "condition": c.whereClause().condition().getText()})
-        return result
-
-    def _parse_embedded_clauses(self, clauses) -> List[Dict]:
-        """Parse embeddedClause: withCardinalityClause | withStructureClause."""
-        result = []
-        for c in clauses:
-            if c.withCardinalityClause():
-                result.append({"type": "CARDINALITY", "value": c.withCardinalityClause().cardinalityType().getText()})
-            elif c.withStructureClause():
-                result.append({"type": "STRUCTURE",
-                               "fields": [id.getText() for id in c.withStructureClause().identifierList().identifier()]})
-        return result
-
-    def _parse_entity_clauses(self, clauses) -> List[Dict]:
-        """Parse entityClause: withAttributesClause | withKeyClause."""
-        result = []
-        for c in clauses:
-            if c.withAttributesClause():
-                result.append({"type": "ATTRIBUTES",
-                               "attributes": [id.getText() for id in c.withAttributesClause().identifierList().identifier()]})
-            elif c.withKeyClause():
-                result.append({"type": "KEY", "key_name": c.withKeyClause().identifier().getText()})
-        return result
-
-    def _parse_extract_clauses(self, clauses) -> List[Dict]:
-        """Parse EXTRACT operation clauses."""
-        result = []
-        for c in clauses:
-            if c.generateKeyClause():
-                gk = c.generateKeyClause()
-                result.append({"type": "GENERATE_KEY", "key_name": gk.identifier(0).getText(),
-                               "mode": "SERIAL" if gk.SERIAL() else "FROM",
-                               "from_field": gk.identifier(1).getText() if gk.FROM() else None})
-            elif c.addReferenceClause():
-                result.append({"type": "ADD_REFERENCE", "ref_name": c.addReferenceClause().identifier(0).getText(),
-                               "target": c.addReferenceClause().identifier(1).getText()})
-        return result
-
-    def _parse_reltype_clauses(self, clauses) -> List[Dict]:
-        """Parse RELTYPE operation clauses."""
-        result = []
-        for c in clauses:
-            if c.withPropertiesClause():
-                result.append({"type": "PROPERTIES",
-                               "properties": [id.getText() for id in c.withPropertiesClause().identifierList().identifier()]})
-            elif c.withCardinalityClause():
-                result.append({"type": "CARDINALITY", "value": c.withCardinalityClause().cardinalityType().getText()})
-        return result
-
-    def _parse_nest_clauses(self, clauses) -> List[Dict]:
-        result = []
-        for c in clauses:
-            if c.withCardinalityClause():
-                result.append({"type": "CARDINALITY", "value": c.withCardinalityClause().cardinalityType().getText()})
-            elif c.usingKeyClause():
-                result.append({"type": "USING_KEY", "value": c.usingKeyClause().identifier().getText()})
-        return result
-
-    def _parse_flatten_clauses(self, clauses) -> List[Dict]:
-        """
-        Parse FLATTEN clauses:
-        - GENERATE KEY: Primary key generation (SERIAL, STRING PREFIX, FROM field)
-        - ADD REFERENCE: Foreign key to another entity
-        - RENAME: Rename columns (e.g., RENAME value TO tag_value for primitive arrays)
-        """
-        result = []
-        for c in clauses:
-            if c.generateKeyClause():
-                gk = c.generateKeyClause()
-                if gk.SERIAL():
-                    result.append({"type": "GENERATE_KEY", "key_name": gk.identifier(0).getText(),
-                                   "mode": "SERIAL"})
-                elif gk.STRING():
-                    # STRING PREFIX "prefix"
-                    prefix = gk.STRING_LITERAL().getText().strip("'\"")
-                    result.append({"type": "GENERATE_KEY", "key_name": gk.identifier(0).getText(),
-                                   "mode": "STRING", "prefix": prefix})
-                elif gk.FROM():
-                    result.append({"type": "GENERATE_KEY", "key_name": gk.identifier(0).getText(),
-                                   "mode": "FROM", "from_field": gk.identifier(1).getText()})
-            elif c.addReferenceClause():
-                result.append({"type": "ADD_REFERENCE", "ref_name": c.addReferenceClause().identifier(0).getText(),
-                               "target": c.addReferenceClause().identifier(1).getText()})
-            elif c.columnRenameClause():
-                # RENAME old_name TO new_name - used for renaming columns within FLATTEN
-                # Example: RENAME value TO tag_value (for primitive arrays)
-                rc = c.columnRenameClause()
-                result.append({
-                    "type": "RENAME",
-                    "old_name": rc.identifier(0).getText(),
-                    "new_name": rc.identifier(1).getText()
-                })
-        return result
-
-    def _parse_key_columns(self, ctx) -> List[str]:
-        """Parse keyColumns rule: single identifier or parenthesized list."""
-        if ctx.identifier():
-            # Single column: ADD PRIMARY KEY id
-            return [ctx.identifier().getText()]
-        elif ctx.identifierList():
-            # Composite key: ADD PRIMARY KEY (id1, id2)
-            return [id.getText() for id in ctx.identifierList().identifier()]
-        return []
-
-    def _parse_key_clauses(self, clauses) -> List[Dict]:
-        result = []
-        for c in clauses:
-            if c.referencesClause():
-                ref = c.referencesClause()
-                result.append({"type": "REFERENCES", "target": ref.identifier().getText(),
-                               "columns": [id.getText() for id in ref.identifierList().identifier()]})
-            elif c.withColumnsClause():
-                result.append({"type": "COLUMNS",
-                               "columns": [id.getText() for id in c.withColumnsClause().identifierList().identifier()]})
-        return result
-
-    def _parse_variation_clauses(self, clauses) -> List[Dict]:
-        result = []
-        for c in clauses:
-            if c.withAttributesClause():
-                result.append({"type": "ATTRIBUTES",
-                               "attributes": [id.getText() for id in c.withAttributesClause().identifierList().identifier()]})
-            elif c.withRelationshipsClause():
-                result.append({"type": "RELATIONSHIPS",
-                               "relationships": [id.getText() for id in c.withRelationshipsClause().identifierList().identifier()]})
-            elif c.withCountClause():
-                result.append({"type": "COUNT", "count": int(c.withCountClause().INTEGER_LITERAL().getText())})
-        return result
-
-
 class SchemaTransformer:
     """Transform schema based on SMEL operations."""
 
@@ -477,6 +76,32 @@ class SchemaTransformer:
     def __init__(self, database: Database):
         self.database = copy.deepcopy(database)
         self.changes: List[str] = []
+        self.key_registry: Dict[str, Dict[str, Any]] = {}
+        self._init_source_keys()
+
+    def _init_source_keys(self) -> None:
+        """Initialize key_registry with existing entities' primary keys."""
+        for entity_name, entity in self.database.entity_types.items():
+            pk = entity.get_primary_key()
+            if pk and pk.unique_properties:
+                pk_attr = entity.get_attribute_by_id(pk.unique_properties[0].property_id)
+                if pk_attr:
+                    self.key_registry[entity_name] = {
+                        "key_field": pk_attr.attr_name,
+                        "key_type": pk_attr.data_type.primitive_type.value if hasattr(pk_attr.data_type, 'primitive_type') else "string",
+                        "prefix": None,
+                        "generated": False
+                    }
+
+    def _auto_prefix(self, entity_name: str) -> str:
+        """
+        Generate automatic prefix from entity name: first 3 chars + last char.
+        Examples: employment -> empt, company -> comy, address -> adds
+        """
+        name = entity_name.lower().replace("_", "")
+        if len(name) <= 4:
+            return name
+        return name[:3] + name[-1]
 
     def execute(self, operations: List[Operation]) -> Database:
         """Execute all operations and return transformed database."""
@@ -547,7 +172,21 @@ class SchemaTransformer:
         if not parent_entity:
             return
 
-        embedded_entity = self.database.get_entity_type(full_embedded_path)
+        # Try to resolve embedded entity through parent's relationships first
+        # This handles consecutive nested FLATTENs like: employment.company
+        # where "employment" is already flattened but "company" is still under "person.employment.company"
+        embedded_entity = None
+        for rel in parent_entity.get_embedded():
+            if rel.aggr_name == embedded_name:
+                # Found the relationship - use its aggregates path to get the actual entity
+                embedded_entity = self.database.get_entity_type(rel.aggregates)
+                if embedded_entity:
+                    full_embedded_path = rel.aggregates  # Update to actual full path
+                break
+
+        # Fallback: try direct path lookup (for backward compatibility)
+        if not embedded_entity:
+            embedded_entity = self.database.get_entity_type(full_embedded_path)
 
         # Check if this is a primitive array (ListDataType attribute)
         is_primitive_array = False
@@ -585,6 +224,9 @@ class SchemaTransformer:
             pk_name = generate_key_clause["key_name"]
             pk_mode = generate_key_clause["mode"]
 
+            # Get prefix: use specified or auto-generate
+            prefix = generate_key_clause.get("prefix") or self._auto_prefix(target_name)
+
             if pk_mode == "STRING":
                 pk_type = PrimitiveDataType(PrimitiveType.STRING, max_length=255)
             elif pk_mode == "FROM" and generate_key_clause.get("from_field") and embedded_entity:
@@ -600,6 +242,15 @@ class SchemaTransformer:
                 is_managed=True,
                 unique_properties=[UniqueProperty(primary_key_type=PKTypeEnum.SIMPLE, property_id=pk_attr.meta_id)]
             ))
+
+            # Register generated key to key_registry
+            self.key_registry[target_name] = {
+                "key_field": pk_name,
+                "key_type": pk_type.primitive_type.value if hasattr(pk_type, 'primitive_type') else "string",
+                "prefix": prefix,
+                "generated": True,
+                "source_entity": parts[0]  # Parent entity name
+            }
 
             # Add data columns based on source type
             if is_primitive_array:
@@ -806,6 +457,80 @@ class SchemaTransformer:
         self.database.remove_entity_type(name)
         self.changes.append(f"DELETE_ENTITY:{name}")
 
+    def _handle_delete_key(self, params: Dict) -> None:
+        """DELETE PRIMARY/FOREIGN/UNIQUE KEY - destructive removal"""
+        self._remove_key_constraint(params, operation="DELETE")
+
+    def _handle_delete_variation(self, params: Dict) -> None:
+        """DELETE VARIATION v1 FROM Customer"""
+        entity_name = params["entity"]
+        variation_id = params["variation_id"]
+
+        entity = self.database.get_entity_type(entity_name)
+        if not entity:
+            return
+
+        # Remove the variation
+        entity.variations = [v for v in entity.variations if v.variation_id != variation_id]
+        self.changes.append(f"DELETE_VARIATION:{entity_name}.{variation_id}")
+
+    def _handle_delete_reltype(self, params: Dict) -> None:
+        """DELETE RELTYPE ACTED_IN (graph database)"""
+        reltype_name = params["name"]
+        # In a full implementation, this would remove the relationship type from graph schema
+        self.changes.append(f"DELETE_RELTYPE:{reltype_name}")
+
+    def _handle_delete_index(self, params: Dict) -> None:
+        """DELETE INDEX idx_name FROM Customer"""
+        index_name = params.get("name")
+        entity_name = params.get("entity")
+
+        entity = self.database.get_entity_type(entity_name) if entity_name else None
+        if not entity:
+            return
+
+        # Index deletion: Remove from metadata
+        self.changes.append(f"DELETE_INDEX:{entity_name}.{index_name}")
+
+    def _handle_delete_label(self, params: Dict) -> None:
+        """DELETE LABEL Employee FROM Person (graph database)"""
+        label = params.get("label")
+        entity_name = params.get("entity")
+
+        entity = self.database.get_entity_type(entity_name) if entity_name else None
+        if not entity:
+            return
+
+        # Label deletion: Remove from entity metadata
+        self.changes.append(f"DELETE_LABEL:{entity_name}.{label}")
+
+    def _handle_add_index(self, params: Dict) -> None:
+        """ADD INDEX idx_name ON Customer (email, name)"""
+        index_name = params.get("name")
+        entity_name = params.get("entity")
+        columns = params.get("columns", [])
+
+        entity = self.database.get_entity_type(entity_name) if entity_name else None
+        if not entity or not columns:
+            return
+
+        # Index implementation: Store as metadata (simplified)
+        # In a full implementation, this would create an IndexConstraint
+        self.changes.append(f"ADD_INDEX:{entity_name}.{index_name}({', '.join(columns)})")
+
+    def _handle_add_label(self, params: Dict) -> None:
+        """ADD LABEL Employee TO Person (graph database)"""
+        label = params.get("label")
+        entity_name = params.get("entity")
+
+        entity = self.database.get_entity_type(entity_name) if entity_name else None
+        if not entity or not label:
+            return
+
+        # Label implementation: Add to entity metadata (graph-specific)
+        # In a full implementation, this would add label to EntityType
+        self.changes.append(f"ADD_LABEL:{entity_name}.{label}")
+
     def _handle_add_key(self, params: Dict) -> None:
         """ADD PRIMARY KEY id TO Customer OR ADD PRIMARY KEY (id1, id2) TO Customer"""
         entity_name = params.get("entity")
@@ -883,8 +608,12 @@ class SchemaTransformer:
         # Default to first UniqueProperty
         return target_pk.unique_properties[0].meta_id
 
-    def _handle_drop_key(self, params: Dict) -> None:
-        """DROP PRIMARY KEY id FROM Customer OR DROP PRIMARY KEY (id1, id2) FROM Customer"""
+    def _handle_remove_key(self, params: Dict) -> None:
+        """REMOVE PRIMARY/FOREIGN/UNIQUE KEY - non-destructive constraint removal"""
+        self._remove_key_constraint(params, operation="REMOVE")
+
+    def _remove_key_constraint(self, params: Dict, operation: str = "REMOVE") -> None:
+        """Helper method for both DELETE_KEY and REMOVE_KEY operations"""
         entity_name = params.get("entity")
         key_columns = params.get("key_columns", [])  # List of column names
         key_type_str = self.KEY_TYPE_MAP.get(params["key_type"], "primary")
@@ -910,7 +639,7 @@ class SchemaTransformer:
                         if fk_attr:
                             fk_attr.is_key = False
                     key_names_str = ", ".join(key_columns)
-                    self.changes.append(f"DROP_KEY:{entity_name}.({key_names_str})")
+                    self.changes.append(f"{operation}_KEY:{entity_name}.({key_names_str})")
                     return
 
             elif key_type_str in ("primary", "unique") and isinstance(constraint, UniqueConstraint):
@@ -961,7 +690,8 @@ class SchemaTransformer:
         entity.add_variation(variation)
         self.changes.append(f"ADD_VARIATION:{entity_name}.{variation_id}")
 
-    def _handle_drop_variation(self, params: Dict) -> None:
+    def _handle_remove_variation(self, params: Dict) -> None:
+        """REMOVE VARIATION v1 FROM Customer - non-destructive"""
         entity_name = params["entity"]
         variation_id = params["variation_id"]
 
@@ -972,8 +702,32 @@ class SchemaTransformer:
         for var in list(entity.variations):
             if var.variation_id == variation_id:
                 entity.variations.remove(var)
-                self.changes.append(f"DROP_VARIATION:{entity_name}.{variation_id}")
+                self.changes.append(f"REMOVE_VARIATION:{entity_name}.{variation_id}")
                 return
+
+    def _handle_remove_index(self, params: Dict) -> None:
+        """REMOVE INDEX idx_name FROM Customer - non-destructive"""
+        index_name = params.get("name")
+        entity_name = params.get("entity")
+
+        entity = self.database.get_entity_type(entity_name) if entity_name else None
+        if not entity:
+            return
+
+        # Index removal: Remove from metadata (non-destructive)
+        self.changes.append(f"REMOVE_INDEX:{entity_name}.{index_name}")
+
+    def _handle_remove_label(self, params: Dict) -> None:
+        """REMOVE LABEL Manager FROM Person - non-destructive (graph database)"""
+        label = params.get("label")
+        entity_name = params.get("entity")
+
+        entity = self.database.get_entity_type(entity_name) if entity_name else None
+        if not entity:
+            return
+
+        # Label removal: Remove from entity metadata (non-destructive)
+        self.changes.append(f"REMOVE_LABEL:{entity_name}.{label}")
 
     def _handle_unnest(self, params: Dict) -> None:
         """UNNEST: Extract embedded object back to standalone entity."""
@@ -1158,40 +912,74 @@ class SchemaTransformer:
         self.changes.append(f"MERGE:{source1_name},{source2_name}->{target_name}")
 
     def _handle_split(self, params: Dict) -> None:
-        """SPLIT: Split one entity into two."""
+        """
+        SPLIT: Split one entity into multiple parts (vertical partitioning).
+
+        New syntax supports explicit field grouping:
+        SPLIT User INTO Person (name, age), Account (email, password)
+
+        Each part reuses the parent entity's primary key.
+        """
         source_name = params["source"]
-        target1_name = params["target1"]
-        target2_name = params["target2"]
+        parts = params.get("parts", [])
+
+        # Fallback to old syntax if no parts specified
+        if not parts and "target1" in params:
+            parts = [
+                {"name": params["target1"], "fields": []},
+                {"name": params["target2"], "fields": []}
+            ]
 
         source = self.database.get_entity_type(source_name)
-        if not source:
+        if not source or not parts:
             return
 
-        # Create two new entities, each gets half the attributes
-        attrs = list(source.attributes)
-        mid = len(attrs) // 2
-
-        # Target1 gets first half (including PK)
-        entity1 = EntityType(object_name=[target1_name])
-        for attr in attrs[:mid] if mid > 0 else attrs[:1]:
-            entity1.add_attribute(Attribute(attr.attr_name, attr.data_type, attr.is_key, attr.is_optional))
         pk = source.get_primary_key()
-        if pk:
-            entity1.add_constraint(copy.deepcopy(pk))
+        created_entities = []
 
-        # Target2 gets second half
-        entity2 = EntityType(object_name=[target2_name])
-        for attr in attrs[mid:] if mid > 0 else attrs[1:]:
-            entity2.add_attribute(Attribute(attr.attr_name, attr.data_type, False, attr.is_optional))
+        # Create each part entity
+        for i, part in enumerate(parts):
+            part_name = part["name"]
+            part_fields = part.get("fields", [])
 
-        self.database.add_entity_type(entity1)
-        self.database.add_entity_type(entity2)
+            new_entity = EntityType(object_name=[part_name])
 
-        # Remove source if different from targets
-        if source_name not in (target1_name, target2_name):
+            # If fields are explicitly specified, use them
+            if part_fields:
+                for field_name in part_fields:
+                    attr = source.get_attribute(field_name)
+                    if attr:
+                        # Don't mark as key here (will be handled by PK constraint)
+                        new_entity.add_attribute(Attribute(
+                            attr.attr_name, attr.data_type, False, attr.is_optional
+                        ))
+            else:
+                # Fallback: split attributes evenly (old behavior)
+                attrs = list(source.attributes)
+                mid = len(attrs) // 2
+                if i == 0:
+                    selected_attrs = attrs[:mid] if mid > 0 else attrs[:1]
+                else:
+                    selected_attrs = attrs[mid:] if mid > 0 else attrs[1:]
+
+                for attr in selected_attrs:
+                    new_entity.add_attribute(Attribute(
+                        attr.attr_name, attr.data_type, False, attr.is_optional
+                    ))
+
+            # Each part reuses the source primary key
+            if pk:
+                new_entity.add_constraint(copy.deepcopy(pk))
+
+            self.database.add_entity_type(new_entity)
+            created_entities.append(part_name)
+
+        # Remove source if different from all targets
+        if source_name not in [p["name"] for p in parts]:
             self.database.remove_entity_type(source_name)
 
-        self.changes.append(f"SPLIT:{source_name}->{target1_name},{target2_name}")
+        parts_str = ",".join(created_entities)
+        self.changes.append(f"SPLIT:{source_name}->{parts_str}")
 
     def _handle_add(self, params: Dict) -> None:
         """ADD: Add attribute, reference, embedded, entity, or variation."""
@@ -1283,7 +1071,7 @@ class SchemaTransformer:
     def _handle_cast(self, params: Dict) -> None:
         """CAST: Change attribute data type."""
         target = params["target"]
-        new_type_str = params["data_type"].upper()
+        new_type_str = params.get("data_type", params.get("type", "STRING")).upper()
 
         parts = target.split(".")
         if len(parts) != 2:
@@ -1428,35 +1216,6 @@ class SchemaTransformer:
             rel_type.rel_name = new_name
             self.database.add_relationship_type(rel_type)
             self.changes.append(f"RENAME_RELTYPE:{old_name}->{new_name}")
-
-
-def parse_smel(file_path: Path) -> tuple:
-    """
-    Parse SMEL file and return (context, operations, errors).
-
-    Args:
-        file_path: Path to .smel file
-
-    Returns:
-        Tuple of (MigrationContext, List[Operation], List[str] errors)
-    """
-    input_stream = FileStream(str(file_path), encoding='utf-8')
-    lexer = SMELLexer(input_stream)
-    lexer.removeErrorListeners()
-    error_listener = SyntaxErrorListener()
-    lexer.addErrorListener(error_listener)
-
-    parser = SMELParser(CommonTokenStream(lexer))
-    parser.removeErrorListeners()
-    parser.addErrorListener(error_listener)
-    tree = parser.migration()
-
-    if error_listener.errors:
-        return None, [], error_listener.errors
-
-    listener = SMELParserListener()
-    ParseTreeWalker().walk(listener, tree)
-    return listener.context, listener.operations, []
 
 
 def db_to_dict(db: Database) -> Dict[str, Any]:
@@ -1746,6 +1505,78 @@ def _calculate_changes(prev: Dict, after: Dict, op) -> Dict:
     return changes
 
 
+def sort_by_dependency(operations: List, initial_entities: set) -> List:
+    """
+    Sort operations by dependency order using multi-pass scanning.
+
+    Args:
+        operations: List of Operation objects
+        initial_entities: Set of entity names that already exist (source entities)
+
+    Returns:
+        List of operations sorted by dependency order
+
+    Raises:
+        ValueError: If circular dependency is detected
+    """
+    # Separate FLATTEN operations from others
+    flatten_ops = []
+    other_ops = []
+
+    for op in operations:
+        if op.op_type == "FLATTEN":
+            flatten_ops.append(op)
+        else:
+            other_ops.append(op)
+
+    # Build dependency info for FLATTEN operations
+    # Each FLATTEN creates a new entity and may reference other entities
+    op_dependencies = {}
+    for op in flatten_ops:
+        target = op.params.get("target")
+        refs = []
+        for clause in op.params.get("clauses", []):
+            if clause.get("type") == "ADD_REFERENCE":
+                ref_target = clause.get("target")
+                if ref_target:
+                    refs.append(ref_target)
+        op_dependencies[target] = {
+            "op": op,
+            "refs": refs
+        }
+
+    # Sort FLATTEN operations by dependency
+    sorted_flatten = []
+    resolved = set(initial_entities)
+    remaining = list(flatten_ops)
+    max_iterations = len(flatten_ops) + 1
+    iterations = 0
+
+    while remaining and iterations < max_iterations:
+        iterations += 1
+        progress = False
+
+        for op in remaining[:]:
+            target = op.params.get("target")
+            deps = op_dependencies.get(target, {}).get("refs", [])
+
+            # Check if all dependencies are resolved
+            if all(dep in resolved for dep in deps):
+                sorted_flatten.append(op)
+                remaining.remove(op)
+                resolved.add(target)
+                progress = True
+
+        if not progress and remaining:
+            # No progress made - circular dependency detected
+            unresolved = [op.params.get("target") for op in remaining]
+            raise ValueError(f"Circular dependency detected among: {unresolved}")
+
+    # Return: other ops first (CAST, COPY, RENAME etc.), then sorted FLATTEN ops
+    # Actually, FLATTEN should come first to create entities, then other operations modify them
+    return sorted_flatten + other_ops
+
+
 def run_migration(direction: str) -> Dict[str, Any]:
     """
     Run a complete migration and return results.
@@ -1784,7 +1615,8 @@ def run_migration(direction: str) -> Dict[str, Any]:
     meta_v1_db = copy.deepcopy(source_db)
 
     # Step 2: Parse and execute SMEL -> Meta V2
-    context, operations, errors = parse_smel(smel_file)
+    from parser_factory import parse_smel_auto
+    context, operations, errors = parse_smel_auto(str(smel_file))
     if errors:
         return {"error": f"SMEL parse errors: {errors}"}
 
@@ -1792,26 +1624,50 @@ def run_migration(direction: str) -> Dict[str, Any]:
     transformer = SchemaTransformer(source_db)
     operations_detail = []
     current_entity_count = len(source_db.entity_types)
+    success_count = 0
+    skipped_count = 0
 
-    for i, op in enumerate(operations):
+    # Sort operations by dependency order
+    initial_entities = set(source_db.entity_types.keys())
+    try:
+        sorted_operations = sort_by_dependency(operations, initial_entities)
+    except ValueError as e:
+        return {"error": f"Dependency error: {e}"}
+
+    for i, op in enumerate(sorted_operations):
         prev_count = len(transformer.database.entity_types)
         prev_snapshot = db_to_dict(transformer.database)
+        prev_changes_len = len(transformer.changes)
+
         handler = getattr(transformer, f"_handle_{op.op_type.lower()}", None)
         if handler:
             handler(op.params)
+
         new_count = len(transformer.database.entity_types)
         after_snapshot = db_to_dict(transformer.database)
+        new_changes_len = len(transformer.changes)
 
         # Calculate changes for this operation
         changes_detail = _calculate_changes(prev_snapshot, after_snapshot, op)
 
+        # Determine operation status: check if transformer.changes was updated
+        # If no new change was recorded, the operation was skipped (e.g., entity not found)
+        if new_changes_len > prev_changes_len:
+            status = "success"
+            success_count += 1
+        else:
+            status = "skipped"
+            skipped_count += 1
+
         operations_detail.append({
             "step": i + 1,
             "type": op.op_type,
+            "original_keyword": op.original_keyword if hasattr(op, 'original_keyword') and op.original_keyword else op.op_type,
             "params": op.params,
             "entity_count_before": prev_count,
             "entity_count_after": new_count,
-            "changes": changes_detail
+            "changes": changes_detail,
+            "status": status
         })
 
     result_db = transformer.database
@@ -1837,9 +1693,15 @@ def run_migration(direction: str) -> Dict[str, Any]:
         "result": db_to_dict(result_db),                       # Unified Meta format (integer, string)
         "target_with_db_types": db_to_source_dict(result_db, target_type),  # Target format (SERIAL, VARCHAR, bsonType)
         "changes": transformer.changes,
+        "key_registry": transformer.key_registry,
         "operations_count": len(operations),
         "stats": {
             "source_count": len(meta_v1_db.entity_types),
             "result_count": len(result_db.entity_types)
+        },
+        "execution_stats": {
+            "total": len(operations),
+            "success": success_count,
+            "skipped": skipped_count
         }
     }

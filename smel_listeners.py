@@ -1,0 +1,856 @@
+"""
+SMEL Listeners - Parsers for all three SMEL grammar variants
+
+This module provides listener implementations for:
+1. SMEL_Specific.g4 - Specific operations version
+2. SMEL_Pauschalisiert.g4 - Generalized operations version
+3. SMEL.g4 - Original version (legacy)
+
+All listeners share common logic through the BaseSMELListener class.
+"""
+import sys
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Dict, List, Any
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from grammar.specific.SMEL_SpecificListener import SMEL_SpecificListener
+from grammar.pauschalisiert.SMEL_PauschalisiertListener import SMEL_PauschalisiertListener
+
+
+@dataclass
+class MigrationContext:
+    """Context information from SMEL migration declaration."""
+    name: str = ""
+    version: str = ""
+    source_db_type: str = ""
+    target_db_type: str = ""
+
+
+@dataclass
+class Operation:
+    """Represents a single SMEL operation."""
+    op_type: str
+    params: Dict[str, Any] = field(default_factory=dict)
+    original_keyword: str = ""  # Original keyword from source (e.g., "FLATTEN_PS", "RENAME_FEATURE")
+
+
+class BaseSMELListener:
+    """
+    Base class with shared parsing logic for all SMEL variants.
+
+    This class provides common helper methods used by all listener implementations.
+    """
+
+    def __init__(self):
+        self.context = MigrationContext()
+        self.operations: List[Operation] = []
+
+    # ========== Helper methods for parsing clauses ==========
+
+    def _parse_flatten_clauses(self, clause_list):
+        """
+        Parse FLATTEN clauses: GENERATE KEY, ADD REFERENCE, RENAME
+        Returns list format compatible with SchemaTransformer in core.py
+        """
+        result = []
+        for clause in clause_list:
+            if hasattr(clause, 'generateKeyClause') and clause.generateKeyClause():
+                gk = clause.generateKeyClause()
+                identifiers = gk.identifier() if isinstance(gk.identifier(), list) else [gk.identifier()]
+
+                if gk.SERIAL():
+                    result.append({
+                        "type": "GENERATE_KEY",
+                        "key_name": identifiers[0].getText(),
+                        "mode": "SERIAL"
+                    })
+                elif gk.STRING():
+                    prefix = gk.STRING_LITERAL().getText().strip("'\"")
+                    result.append({
+                        "type": "GENERATE_KEY",
+                        "key_name": identifiers[0].getText(),
+                        "mode": "STRING",
+                        "prefix": prefix
+                    })
+                elif gk.FROM():
+                    result.append({
+                        "type": "GENERATE_KEY",
+                        "key_name": identifiers[0].getText(),
+                        "mode": "FROM",
+                        "from_field": identifiers[1].getText() if len(identifiers) > 1 else None
+                    })
+
+            elif hasattr(clause, 'addReferenceClause') and clause.addReferenceClause():
+                ref_clause = clause.addReferenceClause()
+                identifiers = ref_clause.identifier() if isinstance(ref_clause.identifier(), list) else [ref_clause.identifier()]
+                result.append({
+                    "type": "ADD_REFERENCE",
+                    "ref_name": identifiers[0].getText(),
+                    "target": identifiers[1].getText() if len(identifiers) > 1 else None
+                })
+
+            elif hasattr(clause, 'columnRenameClause') and clause.columnRenameClause():
+                rename = clause.columnRenameClause()
+                rename_ids = rename.identifier() if isinstance(rename.identifier(), list) else [rename.identifier()]
+                result.append({
+                    "type": "RENAME",
+                    "old_name": rename_ids[0].getText(),
+                    "new_name": rename_ids[1].getText() if len(rename_ids) > 1 else None
+                })
+        return result
+
+
+    def _parse_nest_clauses(self, clause_list):
+        """Parse NEST clauses"""
+        result = {}
+        for clause in clause_list:
+            if hasattr(clause, 'withCardinalityClause') and clause.withCardinalityClause():
+                result['cardinality'] = clause.withCardinalityClause().cardinalityType().getText()
+            elif hasattr(clause, 'usingKeyClause') and clause.usingKeyClause():
+                result['key'] = clause.usingKeyClause().identifier().getText()
+            elif hasattr(clause, 'whereClause') and clause.whereClause():
+                result['where'] = clause.whereClause().condition().getText()
+        return result
+
+    def _parse_attribute_clauses(self, clause_list):
+        """Parse attribute clauses: WITH TYPE, WITH DEFAULT, NOT NULL"""
+        result = {}
+        for clause in clause_list:
+            if hasattr(clause, 'withTypeClause') and clause.withTypeClause():
+                result['type'] = clause.withTypeClause().dataType().getText()
+            elif hasattr(clause, 'withDefaultClause') and clause.withDefaultClause():
+                result['default'] = clause.withDefaultClause().literal().getText()
+            elif hasattr(clause, 'notNullClause') and clause.notNullClause():
+                result['not_null'] = True
+        return result
+
+    def _parse_reference_clauses(self, clause_list):
+        """Parse reference clauses"""
+        result = {}
+        for clause in clause_list:
+            if hasattr(clause, 'withCardinalityClause') and clause.withCardinalityClause():
+                result['cardinality'] = clause.withCardinalityClause().cardinalityType().getText()
+            elif hasattr(clause, 'usingKeyClause') and clause.usingKeyClause():
+                result['key'] = clause.usingKeyClause().identifier().getText()
+            elif hasattr(clause, 'whereClause') and clause.whereClause():
+                result['where'] = clause.whereClause().condition().getText()
+        return result
+
+    def _parse_embedded_clauses(self, clause_list):
+        """Parse embedded clauses"""
+        result = {}
+        for clause in clause_list:
+            if hasattr(clause, 'withCardinalityClause') and clause.withCardinalityClause():
+                result['cardinality'] = clause.withCardinalityClause().cardinalityType().getText()
+            elif hasattr(clause, 'withStructureClause') and clause.withStructureClause():
+                ids = clause.withStructureClause().identifierList()
+                result['structure'] = [id.getText() for id in ids.identifier()]
+        return result
+
+    def _parse_entity_clauses(self, clause_list):
+        """Parse entity clauses"""
+        result = {}
+        for clause in clause_list:
+            if hasattr(clause, 'withAttributesClause') and clause.withAttributesClause():
+                ids = clause.withAttributesClause().identifierList()
+                result['attributes'] = [id.getText() for id in ids.identifier()]
+            elif hasattr(clause, 'withKeyClause') and clause.withKeyClause():
+                result['key'] = clause.withKeyClause().identifier().getText()
+        return result
+
+    def _parse_key_columns(self, key_columns_ctx):
+        """Parse key columns - single or composite"""
+        if key_columns_ctx.identifier():
+            # Single column
+            return [key_columns_ctx.identifier().getText()]
+        elif key_columns_ctx.identifierList():
+            # Composite key (id1, id2, id3)
+            return [id.getText() for id in key_columns_ctx.identifierList().identifier()]
+        return []
+
+    def _parse_key_clauses(self, clause_list):
+        """Parse key clauses"""
+        result = {}
+        for clause in clause_list:
+            if hasattr(clause, 'referencesClause') and clause.referencesClause():
+                ref = clause.referencesClause()
+                result['references'] = {
+                    'table': ref.identifier().getText(),
+                    'columns': [id.getText() for id in ref.identifierList().identifier()]
+                }
+            elif hasattr(clause, 'withColumnsClause') and clause.withColumnsClause():
+                ids = clause.withColumnsClause().identifierList()
+                result['columns'] = [id.getText() for id in ids.identifier()]
+        return result
+
+    def _parse_variation_clauses(self, clause_list):
+        """Parse variation clauses"""
+        result = {}
+        for clause in clause_list:
+            if hasattr(clause, 'withAttributesClause') and clause.withAttributesClause():
+                ids = clause.withAttributesClause().identifierList()
+                result['attributes'] = [id.getText() for id in ids.identifier()]
+            elif hasattr(clause, 'withRelationshipsClause') and clause.withRelationshipsClause():
+                ids = clause.withRelationshipsClause().identifierList()
+                result['relationships'] = [id.getText() for id in ids.identifier()]
+            elif hasattr(clause, 'withCountClause') and clause.withCountClause():
+                result['count'] = int(clause.withCountClause().INTEGER_LITERAL().getText())
+        return result
+
+    def _parse_reltype_clauses(self, clause_list):
+        """Parse relationship type clauses"""
+        result = {}
+        for clause in clause_list:
+            if hasattr(clause, 'withPropertiesClause') and clause.withPropertiesClause():
+                ids = clause.withPropertiesClause().identifierList()
+                result['properties'] = [id.getText() for id in ids.identifier()]
+            elif hasattr(clause, 'withCardinalityClause') and clause.withCardinalityClause():
+                result['cardinality'] = clause.withCardinalityClause().cardinalityType().getText()
+        return result
+
+
+# ==============================================================================
+# SMEL_Specific Listener - For SMEL_Specific.g4
+# ==============================================================================
+
+class SMELSpecificListener(SMEL_SpecificListener, BaseSMELListener):
+    """
+    Listener for SMEL_Specific.g4 grammar.
+
+    Uses specific keywords like ADD_ATTRIBUTE, DELETE_ENTITY, RENAME_FEATURE.
+    """
+
+    def __init__(self):
+        BaseSMELListener.__init__(self)
+
+    # Header parsing (same for all versions)
+    def enterMigrationDecl(self, ctx):
+        self.context.name = ctx.identifier().getText()
+        self.context.version = ctx.version().getText()
+
+    def enterFromToDecl(self, ctx):
+        self.context.source_db_type = ctx.databaseType(0).getText()
+        self.context.target_db_type = ctx.databaseType(1).getText()
+
+    # Structure operations
+    def enterFlatten(self, ctx):
+        self.operations.append(Operation("FLATTEN", {
+            "source": ctx.qualifiedName().getText(),
+            "target": ctx.identifier().getText(),
+            "clauses": self._parse_flatten_clauses(ctx.flattenClause())
+        }, original_keyword="FLATTEN"))
+
+    def enterNest(self, ctx):
+        self.operations.append(Operation("NEST", {
+            "source": ctx.identifier(0).getText(),
+            "target": ctx.identifier(1).getText(),
+            "alias": ctx.identifier(2).getText(),
+            "clauses": self._parse_nest_clauses(ctx.nestClause())
+        }))
+
+    def enterUnnest(self, ctx):
+        clauses = {}
+        for clause in ctx.unnestClause():
+            if clause.AS():
+                clauses['alias'] = clause.identifier().getText()
+            elif clause.usingKeyClause():
+                clauses['key'] = clause.usingKeyClause().identifier().getText()
+
+        self.operations.append(Operation("UNNEST", {
+            "source": ctx.identifier(0).getText(),
+            "parent": ctx.identifier(1).getText(),
+            "clauses": clauses
+        }))
+
+    def enterExtract(self, ctx):
+        attrs = [id.getText() for id in ctx.identifierList().identifier()]
+        self.operations.append(Operation("EXTRACT", {
+            "attributes": attrs,
+            "source_entity": ctx.identifier(0).getText(),
+            "target_entity": ctx.identifier(1).getText(),
+            "clauses": self._parse_flatten_clauses(ctx.extractClause())  # Reuse flatten clause parsing
+        }))
+
+    # ADD operations - each has its own method
+    def enterAdd_attribute(self, ctx):
+        self.operations.append(Operation("ADD_ATTRIBUTE", {
+            "name": ctx.identifier(0).getText(),
+            "entity": ctx.identifier(1).getText() if len(ctx.identifier()) > 1 else None,
+            "clauses": self._parse_attribute_clauses(ctx.attributeClause())
+        }))
+
+    def enterAdd_reference(self, ctx):
+        self.operations.append(Operation("ADD_REFERENCE", {
+            "reference": ctx.qualifiedName().getText(),
+            "target": ctx.identifier().getText(),
+            "clauses": self._parse_reference_clauses(ctx.referenceClause())
+        }))
+
+    def enterAdd_embedded(self, ctx):
+        self.operations.append(Operation("ADD_EMBEDDED", {
+            "name": ctx.identifier(0).getText(),
+            "entity": ctx.identifier(1).getText(),
+            "clauses": self._parse_embedded_clauses(ctx.embeddedClause())
+        }))
+
+    def enterAdd_entity(self, ctx):
+        self.operations.append(Operation("ADD_ENTITY", {
+            "name": ctx.identifier().getText(),
+            "clauses": self._parse_entity_clauses(ctx.entityClause())
+        }))
+
+    def enterAdd_primary_key(self, ctx):
+        self.operations.append(Operation("ADD_KEY", {
+            "key_type": "PRIMARY",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None,
+            "clauses": self._parse_key_clauses(ctx.keyClause())
+        }))
+
+    def enterAdd_foreign_key(self, ctx):
+        self.operations.append(Operation("ADD_KEY", {
+            "key_type": "FOREIGN",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None,
+            "clauses": self._parse_key_clauses(ctx.keyClause())
+        }))
+
+    def enterAdd_unique_key(self, ctx):
+        self.operations.append(Operation("ADD_KEY", {
+            "key_type": "UNIQUE",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None,
+            "clauses": self._parse_key_clauses(ctx.keyClause())
+        }))
+
+    def enterAdd_partition_key(self, ctx):
+        self.operations.append(Operation("ADD_KEY", {
+            "key_type": "PARTITION",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None,
+            "clauses": self._parse_key_clauses(ctx.keyClause())
+        }))
+
+    def enterAdd_clustering_key(self, ctx):
+        self.operations.append(Operation("ADD_KEY", {
+            "key_type": "CLUSTERING",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None,
+            "clauses": self._parse_key_clauses(ctx.keyClause())
+        }))
+
+    def enterAdd_variation(self, ctx):
+        self.operations.append(Operation("ADD_VARIATION", {
+            "variation_id": ctx.identifier(0).getText(),
+            "entity": ctx.identifier(1).getText(),
+            "clauses": self._parse_variation_clauses(ctx.variationClause())
+        }))
+
+    def enterAdd_reltype(self, ctx):
+        self.operations.append(Operation("ADD_RELTYPE", {
+            "name": ctx.identifier(0).getText(),
+            "source": ctx.identifier(1).getText(),
+            "target": ctx.identifier(2).getText(),
+            "clauses": self._parse_reltype_clauses(ctx.relTypeClause())
+        }))
+
+    def enterAdd_index(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        columns = [id.getText() for id in ctx.identifierList().identifier()]
+        self.operations.append(Operation("ADD_INDEX", {
+            "name": identifiers[0].getText(),
+            "entity": identifiers[1].getText() if len(identifiers) > 1 else None,
+            "columns": columns
+        }))
+
+    def enterAdd_label(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("ADD_LABEL", {
+            "label": identifiers[0].getText(),
+            "entity": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    # DELETE operations
+    def enterDelete_attribute(self, ctx):
+        self.operations.append(Operation("DELETE_ATTRIBUTE", {
+            "target": ctx.qualifiedName().getText()
+        }))
+
+    def enterDelete_reference(self, ctx):
+        self.operations.append(Operation("DELETE_REFERENCE", {
+            "reference": ctx.qualifiedName().getText()
+        }))
+
+    def enterDelete_embedded(self, ctx):
+        self.operations.append(Operation("DELETE_EMBEDDED", {
+            "embedded": ctx.qualifiedName().getText()
+        }))
+
+    def enterDelete_entity(self, ctx):
+        self.operations.append(Operation("DELETE_ENTITY", {
+            "name": ctx.identifier().getText()
+        }))
+
+    def enterDelete_primary_key(self, ctx):
+        self.operations.append(Operation("DELETE_KEY", {
+            "key_type": "PRIMARY",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None
+        }))
+
+    def enterDelete_foreign_key(self, ctx):
+        self.operations.append(Operation("DELETE_KEY", {
+            "key_type": "FOREIGN",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None
+        }))
+
+    def enterDelete_unique_key(self, ctx):
+        self.operations.append(Operation("DELETE_KEY", {
+            "key_type": "UNIQUE",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None
+        }))
+
+    def enterDelete_partition_key(self, ctx):
+        self.operations.append(Operation("DELETE_KEY", {
+            "key_type": "PARTITION",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None
+        }))
+
+    def enterDelete_clustering_key(self, ctx):
+        self.operations.append(Operation("DELETE_KEY", {
+            "key_type": "CLUSTERING",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None
+        }))
+
+    def enterDelete_variation(self, ctx):
+        self.operations.append(Operation("DELETE_VARIATION", {
+            "variation_id": ctx.identifier(0).getText(),
+            "entity": ctx.identifier(1).getText()
+        }))
+
+    def enterDelete_reltype(self, ctx):
+        self.operations.append(Operation("DELETE_RELTYPE", {
+            "name": ctx.identifier().getText()
+        }))
+
+    def enterDelete_index(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("DELETE_INDEX", {
+            "name": identifiers[0].getText(),
+            "entity": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    def enterDelete_label(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("DELETE_LABEL", {
+            "label": identifiers[0].getText(),
+            "entity": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    # REMOVE operations (non-destructive constraint removal)
+    def enterRemove_index(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("REMOVE_INDEX", {
+            "name": identifiers[0].getText(),
+            "entity": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    def enterRemove_unique_key(self, ctx):
+        self.operations.append(Operation("REMOVE_KEY", {
+            "key_type": "UNIQUE",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None
+        }))
+
+    def enterRemove_foreign_key(self, ctx):
+        self.operations.append(Operation("REMOVE_KEY", {
+            "key_type": "FOREIGN",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None
+        }))
+
+    def enterRemove_label(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("REMOVE_LABEL", {
+            "label": identifiers[0].getText(),
+            "entity": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    def enterRemove_variation(self, ctx):
+        self.operations.append(Operation("REMOVE_VARIATION", {
+            "variation_id": ctx.identifier(0).getText(),
+            "entity": ctx.identifier(1).getText()
+        }))
+
+    # RENAME operations
+    def enterRename_feature(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("RENAME", {
+            "old_name": identifiers[0].getText(),
+            "new_name": identifiers[1].getText() if len(identifiers) > 1 else None,
+            "entity": identifiers[2].getText() if len(identifiers) > 2 else None
+        }, original_keyword="RENAME_FEATURE"))
+
+    def enterRename_entity(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("RENAME_ENTITY", {
+            "old_name": identifiers[0].getText(),
+            "new_name": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    def enterRename_reltype(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("RENAME_RELTYPE", {
+            "old_name": identifiers[0].getText(),
+            "new_name": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    # Simple operations
+    def enterCopy(self, ctx):
+        self.operations.append(Operation("COPY", {
+            "source": ctx.qualifiedName(0).getText(),
+            "target": ctx.qualifiedName(1).getText()
+        }))
+
+    def enterMove(self, ctx):
+        self.operations.append(Operation("MOVE", {
+            "source": ctx.qualifiedName(0).getText(),
+            "target": ctx.qualifiedName(1).getText()
+        }))
+
+    def enterMerge(self, ctx):
+        self.operations.append(Operation("MERGE", {
+            "source1": ctx.identifier(0).getText(),
+            "source2": ctx.identifier(1).getText(),
+            "target": ctx.identifier(2).getText(),
+            "alias": ctx.identifier(3).getText() if len(ctx.identifier()) > 3 else None
+        }))
+
+    def enterSplit(self, ctx):
+        # Parse splitPart contexts
+        split_parts = ctx.splitPart() if isinstance(ctx.splitPart(), list) else [ctx.splitPart()]
+
+        parts = []
+        for part in split_parts:
+            part_name = part.identifier().getText()
+            part_fields = [id.getText() for id in part.identifierList().identifier()]
+            parts.append({
+                "name": part_name,
+                "fields": part_fields
+            })
+
+        self.operations.append(Operation("SPLIT", {
+            "source": ctx.identifier().getText(),
+            "parts": parts
+        }))
+
+    def enterCast(self, ctx):
+        self.operations.append(Operation("CAST", {
+            "target": ctx.qualifiedName().getText(),
+            "type": ctx.dataType().getText()
+        }))
+
+    def enterLinking(self, ctx):
+        self.operations.append(Operation("LINKING", {
+            "source": ctx.qualifiedName().getText(),
+            "target": ctx.identifier().getText()
+        }))
+
+
+# ==============================================================================
+# SMEL_Pauschalisiert Listener - For SMEL_Pauschalisiert.g4
+# ==============================================================================
+
+class SMELPauschalisiertListener(SMEL_PauschalisiertListener, BaseSMELListener):
+    """
+    Listener for SMEL_Pauschalisiert.g4 grammar.
+
+    Uses generalized keywords like ADD_PS, DELETE_PS, RENAME_PS with type parameters.
+    Reuses helper methods from BaseSMELListener for common parsing logic.
+    """
+
+    def __init__(self):
+        BaseSMELListener.__init__(self)
+
+    # Header parsing (same for all versions)
+    def enterMigrationDecl(self, ctx):
+        self.context.name = ctx.identifier().getText()
+        self.context.version = ctx.version().getText()
+
+    def enterFromToDecl(self, ctx):
+        self.context.source_db_type = ctx.databaseType(0).getText()
+        self.context.target_db_type = ctx.databaseType(1).getText()
+
+    # Structure operations
+    def enterFlatten_ps(self, ctx):
+        self.operations.append(Operation("FLATTEN", {
+            "source": ctx.qualifiedName().getText(),
+            "target": ctx.identifier().getText(),
+            "clauses": self._parse_flatten_clauses(ctx.flattenClause())
+        }, original_keyword="FLATTEN_PS"))
+
+    def enterNest_ps(self, ctx):
+        self.operations.append(Operation("NEST", {
+            "source": ctx.identifier(0).getText(),
+            "target": ctx.identifier(1).getText(),
+            "alias": ctx.identifier(2).getText(),
+            "clauses": self._parse_nest_clauses(ctx.nestClause())
+        }, original_keyword="NEST_PS"))
+
+    def enterUnnest_ps(self, ctx):
+        clauses = {}
+        for clause in ctx.unnestClause():
+            if clause.AS():
+                clauses['alias'] = clause.identifier().getText()
+            elif clause.usingKeyClause():
+                clauses['key'] = clause.usingKeyClause().identifier().getText()
+
+        self.operations.append(Operation("UNNEST", {
+            "source": ctx.identifier(0).getText(),
+            "parent": ctx.identifier(1).getText(),
+            "clauses": clauses
+        }))
+
+    def enterExtract_ps(self, ctx):
+        attrs = [id.getText() for id in ctx.identifierList().identifier()]
+        self.operations.append(Operation("EXTRACT", {
+            "attributes": attrs,
+            "source_entity": ctx.identifier(0).getText(),
+            "target_entity": ctx.identifier(1).getText(),
+            "clauses": self._parse_flatten_clauses(ctx.extractClause())
+        }))
+
+    # ADD_PS operations - same internal structure as original SMEL
+    def enterAttributeAdd(self, ctx):
+        self.operations.append(Operation("ADD_ATTRIBUTE", {
+            "name": ctx.identifier(0).getText(),
+            "entity": ctx.identifier(1).getText() if len(ctx.identifier()) > 1 else None,
+            "clauses": self._parse_attribute_clauses(ctx.attributeClause())
+        }))
+
+    def enterReferenceAdd(self, ctx):
+        self.operations.append(Operation("ADD_REFERENCE", {
+            "reference": ctx.qualifiedName().getText(),
+            "target": ctx.identifier().getText(),
+            "clauses": self._parse_reference_clauses(ctx.referenceClause())
+        }))
+
+    def enterEmbeddedAdd(self, ctx):
+        self.operations.append(Operation("ADD_EMBEDDED", {
+            "name": ctx.identifier(0).getText(),
+            "entity": ctx.identifier(1).getText(),
+            "clauses": self._parse_embedded_clauses(ctx.embeddedClause())
+        }))
+
+    def enterEntityAdd(self, ctx):
+        self.operations.append(Operation("ADD_ENTITY", {
+            "name": ctx.identifier().getText(),
+            "clauses": self._parse_entity_clauses(ctx.entityClause())
+        }))
+
+    def enterKeyAdd(self, ctx):
+        self.operations.append(Operation("ADD_KEY", {
+            "key_type": ctx.keyType().getText(),
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None,
+            "clauses": self._parse_key_clauses(ctx.keyClause())
+        }))
+
+    def enterVariationAdd(self, ctx):
+        self.operations.append(Operation("ADD_VARIATION", {
+            "variation_id": ctx.identifier(0).getText(),
+            "entity": ctx.identifier(1).getText(),
+            "clauses": self._parse_variation_clauses(ctx.variationClause())
+        }))
+
+    def enterRelTypeAdd(self, ctx):
+        self.operations.append(Operation("ADD_RELTYPE", {
+            "name": ctx.identifier(0).getText(),
+            "source": ctx.identifier(1).getText(),
+            "target": ctx.identifier(2).getText(),
+            "clauses": self._parse_reltype_clauses(ctx.relTypeClause())
+        }))
+
+    def enterIndexAdd(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        columns = [id.getText() for id in ctx.identifierList().identifier()]
+        self.operations.append(Operation("ADD_INDEX", {
+            "name": identifiers[0].getText(),
+            "entity": identifiers[1].getText() if len(identifiers) > 1 else None,
+            "columns": columns
+        }))
+
+    def enterLabelAdd(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("ADD_LABEL", {
+            "label": identifiers[0].getText(),
+            "entity": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    # DELETE_PS operations
+    def enterAttributeDelete(self, ctx):
+        self.operations.append(Operation("DELETE_ATTRIBUTE", {
+            "target": ctx.qualifiedName().getText()
+        }))
+
+    def enterReferenceDelete(self, ctx):
+        self.operations.append(Operation("DELETE_REFERENCE", {
+            "reference": ctx.qualifiedName().getText()
+        }))
+
+    def enterEmbeddedDelete(self, ctx):
+        self.operations.append(Operation("DELETE_EMBEDDED", {
+            "embedded": ctx.qualifiedName().getText()
+        }))
+
+    def enterEntityDelete(self, ctx):
+        self.operations.append(Operation("DELETE_ENTITY", {
+            "name": ctx.identifier().getText()
+        }))
+
+    def enterKeyDelete(self, ctx):
+        self.operations.append(Operation("DELETE_KEY", {
+            "key_type": ctx.keyType().getText(),
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None
+        }))
+
+    def enterVariationDelete(self, ctx):
+        self.operations.append(Operation("DELETE_VARIATION", {
+            "variation_id": ctx.identifier(0).getText(),
+            "entity": ctx.identifier(1).getText()
+        }))
+
+    def enterRelTypeDelete(self, ctx):
+        self.operations.append(Operation("DELETE_RELTYPE", {
+            "name": ctx.identifier().getText()
+        }))
+
+    def enterIndexDelete(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("DELETE_INDEX", {
+            "name": identifiers[0].getText(),
+            "entity": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    def enterLabelDelete(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("DELETE_LABEL", {
+            "label": identifiers[0].getText(),
+            "entity": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    # REMOVE_PS operations
+    def enterIndexRemove(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("REMOVE_INDEX", {
+            "name": identifiers[0].getText(),
+            "entity": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    def enterUniqueKeyRemove(self, ctx):
+        self.operations.append(Operation("REMOVE_KEY", {
+            "key_type": "UNIQUE",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None
+        }))
+
+    def enterForeignKeyRemove(self, ctx):
+        self.operations.append(Operation("REMOVE_KEY", {
+            "key_type": "FOREIGN",
+            "key_columns": self._parse_key_columns(ctx.keyColumns()),
+            "entity": ctx.identifier().getText() if ctx.identifier() else None
+        }))
+
+    def enterLabelRemove(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("REMOVE_LABEL", {
+            "label": identifiers[0].getText(),
+            "entity": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    def enterVariationRemove(self, ctx):
+        self.operations.append(Operation("REMOVE_VARIATION", {
+            "variation_id": ctx.identifier(0).getText(),
+            "entity": ctx.identifier(1).getText()
+        }))
+
+    # RENAME_PS operations
+    def enterFeatureRename(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("RENAME", {
+            "old_name": identifiers[0].getText(),
+            "new_name": identifiers[1].getText() if len(identifiers) > 1 else None,
+            "entity": identifiers[2].getText() if len(identifiers) > 2 else None
+        }, original_keyword="RENAME_PS FEATURE"))
+
+    def enterEntityRename(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("RENAME_ENTITY", {
+            "old_name": identifiers[0].getText(),
+            "new_name": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    def enterRelTypeRename(self, ctx):
+        identifiers = ctx.identifier() if isinstance(ctx.identifier(), list) else [ctx.identifier()]
+        self.operations.append(Operation("RENAME_RELTYPE", {
+            "old_name": identifiers[0].getText(),
+            "new_name": identifiers[1].getText() if len(identifiers) > 1 else None
+        }))
+
+    # Simple operations with _PS suffix
+    def enterCopy_ps(self, ctx):
+        self.operations.append(Operation("COPY", {
+            "source": ctx.qualifiedName(0).getText(),
+            "target": ctx.qualifiedName(1).getText()
+        }))
+
+    def enterMove_ps(self, ctx):
+        self.operations.append(Operation("MOVE", {
+            "source": ctx.qualifiedName(0).getText(),
+            "target": ctx.qualifiedName(1).getText()
+        }))
+
+    def enterMerge_ps(self, ctx):
+        self.operations.append(Operation("MERGE", {
+            "source1": ctx.identifier(0).getText(),
+            "source2": ctx.identifier(1).getText(),
+            "target": ctx.identifier(2).getText(),
+            "alias": ctx.identifier(3).getText() if len(ctx.identifier()) > 3 else None
+        }))
+
+    def enterSplit_ps(self, ctx):
+        # Parse splitPartPs contexts
+        split_parts = ctx.splitPartPs() if isinstance(ctx.splitPartPs(), list) else [ctx.splitPartPs()]
+
+        parts = []
+        for part in split_parts:
+            part_name = part.identifier().getText()
+            part_fields = [id.getText() for id in part.identifierList().identifier()]
+            parts.append({
+                "name": part_name,
+                "fields": part_fields
+            })
+
+        self.operations.append(Operation("SPLIT", {
+            "source": ctx.identifier().getText(),
+            "parts": parts
+        }))
+
+    def enterCast_ps(self, ctx):
+        self.operations.append(Operation("CAST", {
+            "target": ctx.qualifiedName().getText(),
+            "type": ctx.dataType().getText()
+        }))
+
+    def enterLinking_ps(self, ctx):
+        self.operations.append(Operation("LINKING", {
+            "source": ctx.qualifiedName().getText(),
+            "target": ctx.identifier().getText()
+        }))

@@ -1,0 +1,114 @@
+-- SMEL Mini-Example: MongoDB -> PostgreSQL (Specific Operations Version)
+-- Person Document (multi-level nested objects + arrays) -> Normalized Tables
+-- Direction: Denormalized (Embedded) -> Normalized (3NF)
+-- Tests: Multiple operation types (FLATTEN, CAST, RENAME)
+-- Syntax: SMEL_Specific.g4
+
+MIGRATION person_mongo_to_pg:1.0
+FROM DOCUMENT TO RELATIONAL
+USING person_schema:1
+
+-- ============================================
+-- Source: MongoDB Person Document
+-- ============================================
+-- {
+--   _id: "p001",
+--   name: "Zhang San",
+--   age: "28",                              -- Note: stored as string in MongoDB
+--   address: {
+--     street: "Hauptstrasse 10",
+--     city: "Berlin"
+--   },
+--   employment: {
+--     position: "Software Engineer",
+--     company: {
+--       name: "Tech Corp",
+--       address: {
+--         street: "Business Str 5",
+--         city: "Munich"
+--       }
+--     }
+--   },
+--   tags: ["student", "developer"],
+--   knows: ["p002", "p003"]
+-- }
+
+-- ============================================
+-- Target: PostgreSQL 3NF Tables
+-- ============================================
+-- person (id, name, age)                    -- age: INTEGER
+-- address (id, street, city, person_id)
+-- employment (id, position, person_id)
+-- company (id, name, employment_id)
+-- company_address (id, street, city, company_id)
+-- person_tag (id, tag_value, person_id)
+-- person_knows (person_id, knows_person_id)
+
+-- ============================================
+-- Step 1: FLATTEN - Extract address embedded object
+-- ============================================
+-- Extracts embedded 'address' document into separate 'address' table
+
+FLATTEN person.address AS address
+    GENERATE KEY id AS String PREFIX "addr"
+    ADD REFERENCE person_id TO person
+
+-- ============================================
+-- Step 2: FLATTEN - Extract employment embedded object
+-- ============================================
+-- Extracts embedded 'employment' document (contains position, company)
+
+FLATTEN person.employment AS employment
+    GENERATE KEY id AS String PREFIX "emp"
+    ADD REFERENCE person_id TO person
+
+-- ============================================
+-- Step 3: FLATTEN - Extract company from employment
+-- ============================================
+-- Extracts nested company object from employment (2nd level nesting)
+
+FLATTEN employment.company AS company
+    GENERATE KEY id AS String PREFIX "comp"
+    ADD REFERENCE employment_id TO employment
+
+-- ============================================
+-- Step 4: FLATTEN - Extract company address (3rd level nesting)
+-- ============================================
+-- Demonstrates 3-level deep nesting: person.employment.company.address
+
+FLATTEN company.address AS company_address
+    GENERATE KEY id AS String PREFIX "caddr"
+    ADD REFERENCE company_id TO company
+
+-- ============================================
+-- Step 5: FLATTEN - Expand tags array into table
+-- ============================================
+-- Expands value array into separate person_tag table
+
+FLATTEN person.tags[] AS person_tag
+    GENERATE KEY id AS String PREFIX "t"
+    ADD REFERENCE person_id TO person
+    RENAME value TO tag_value
+
+-- ============================================
+-- Step 6: FLATTEN - Expand knows array into M:N join table
+-- ============================================
+-- No GENERATE KEY -> composite primary key
+
+FLATTEN person.knows[] AS person_knows
+    ADD REFERENCE person_id TO person
+    ADD REFERENCE knows_person_id TO person
+
+-- ============================================
+-- Step 7: CAST - Type conversion
+-- ============================================
+-- MongoDB stores age as string, PostgreSQL needs INTEGER
+
+CAST person.age TO Integer
+
+-- ============================================
+-- Step 8: RENAME_FEATURE - Rename _id to id
+-- ============================================
+-- PostgreSQL naming convention: no underscore prefix
+
+RENAME_FEATURE _id TO id IN person

@@ -1,0 +1,402 @@
+/*
+ * SMEL_Pauschalisiert - Schema Migration & Evolution Language (Generalized Operations Version)
+ * A domain-specific language for database schema migration
+ *
+ * This version uses generalized, parameterized operations.
+ * Operations use a base keyword with parameters (e.g., ADD_PS ATTRIBUTE, ADD_PS REFERENCE)
+ *
+ * Comparison: This is the "Pauschalisiert" (Generalized) version. See SMEL_Specific.g4
+ * for the "Specific" version that uses independent keywords for each operation.
+ *
+ * Supported database models: RELATIONAL, DOCUMENT, GRAPH, COLUMNAR
+ * Design: from André Conrad
+ *
+ * Example SMEL script:
+ *   MIGRATION person_migration:1.0
+ *   FROM DOCUMENT TO RELATIONAL
+ *   USING person_schema:1.0
+ *
+ *   FLATTEN_PS person.address AS address
+ *     GENERATE KEY address_id AS SERIAL
+ *     ADD REFERENCE person_id TO person
+ */
+grammar SMEL_Pauschalisiert;
+
+// ============================================================================
+// PARSER RULES
+// ============================================================================
+
+// Entry point: migration script = header + operations
+migration: header operation* EOF;
+header: migrationDecl fromToDecl usingDecl;                         // MIGRATION name:ver FROM type TO type USING schema:ver
+migrationDecl: MIGRATION identifier COLON version;                  // MIGRATION payment_migration:1.0
+fromToDecl: FROM databaseType TO databaseType;                      // FROM RELATIONAL TO Document
+usingDecl: USING identifier COLON version;                          // USING iso20022_schema:1.0
+databaseType: RELATIONAL | DOCUMENT | GRAPH | COLUMNAR;             // Abstract database model types
+version: VERSION_NUMBER | INTEGER_LITERAL;                          // 1 | 1.0 | 1.0.0
+
+// ============================================================================
+// OPERATIONS - Generalized operations with parameters
+// ============================================================================
+// Structure:  NEST_PS, UNNEST_PS, FLATTEN_PS, EXTRACT_PS
+// Movement:   COPY_PS, MOVE_PS, MERGE_PS, SPLIT_PS
+// Type:       CAST_PS, LINKING_PS
+// CRUD:       ADD_PS, DELETE_PS, DROP_PS, RENAME_PS
+
+operation: nest_ps | unnest_ps | flatten_ps
+         | copy_ps | move_ps | merge_ps | split_ps | cast_ps | linking_ps | extract_ps
+         | add_ps | delete_ps | remove_ps | rename_ps;
+
+// ============================================================================
+// ADD_PS - Generalized ADD operation with type parameter
+// ============================================================================
+// Supports adding:
+//   - ATTRIBUTE:  Add new attribute to entity
+//   - REFERENCE:  Add foreign key relationship
+//   - EMBEDDED:   Add embedded object relationship (MongoDB style)
+//   - ENTITY:     Add new entity/table
+//   - KEY:        Add primary/unique/foreign key constraint
+//   - VARIATION:  Add structural variation (U-Schema support)
+//   - RELTYPE:    Add relationship type (Graph database support)
+//
+// Example: ADD_PS ATTRIBUTE email TO Customer WITH TYPE String NOT NULL
+// Example: ADD_PS PRIMARY KEY id TO Customer
+
+add_ps: ADD_PS (attributeAdd | referenceAdd | embeddedAdd | entityAdd
+        | keyAdd | variationAdd | relTypeAdd | indexAdd | labelAdd);
+
+// Add attribute: ADD_PS ATTRIBUTE email TO Customer WITH TYPE String NOT NULL
+attributeAdd: ATTRIBUTE identifier (TO identifier)? attributeClause*;
+attributeClause: withTypeClause | withDefaultClause | notNullClause;
+withTypeClause: WITH TYPE dataType;
+withDefaultClause: WITH DEFAULT literal;
+notNullClause: NOT_NULL;
+
+// Add reference: ADD_PS REFERENCE customer_id TO Order WITH CARDINALITY ONE_TO_MANY
+referenceAdd: REFERENCE qualifiedName TO identifier referenceClause*;
+referenceClause: withCardinalityClause | usingKeyClause | whereClause;
+
+// Add embedded: ADD_PS EMBEDDED address TO Customer WITH CARDINALITY ONE_TO_ONE
+embeddedAdd: EMBEDDED identifier TO identifier embeddedClause*;
+embeddedClause: withCardinalityClause | withStructureClause;
+withStructureClause: WITH STRUCTURE LPAREN identifierList RPAREN;
+
+// Add entity: ADD_PS ENTITY Product WITH ATTRIBUTES (id, name)
+entityAdd: ENTITY identifier entityClause*;
+entityClause: withAttributesClause | withKeyClause;
+withKeyClause: WITH KEY identifier;
+
+// Add key: ADD_PS PRIMARY KEY id TO Customer OR ADD_PS PRIMARY KEY (id1, id2) TO Customer
+keyAdd: keyType KEY keyColumns (TO identifier)? keyClause*;
+
+// Key columns - single identifier or parenthesized list for composite keys
+keyColumns: identifier | LPAREN identifierList RPAREN;
+
+// Add variation: ADD_PS VARIATION v1 TO Customer WITH ATTRIBUTES (a, b)
+variationAdd: VARIATION identifier TO identifier variationClause*;
+
+// Add relationship type (Graph): ADD_PS RELTYPE ACTED_IN FROM Actor TO Movie
+relTypeAdd: RELTYPE identifier FROM identifier TO identifier relTypeClause*;
+
+// Add index: ADD_PS INDEX idx_name ON Customer (email, name)
+indexAdd: INDEX identifier ON identifier LPAREN identifierList RPAREN;
+
+// Add label (Graph): ADD_PS LABEL Employee TO Person
+labelAdd: LABEL identifier TO identifier;
+
+// ============================================================================
+// DELETE_PS - Generalized DELETE operation with type parameter
+// ============================================================================
+// Supports deleting:
+//   - ATTRIBUTE: Remove attribute from entity
+//   - REFERENCE: Remove foreign key relationship
+//   - EMBEDDED:  Remove embedded object relationship
+//   - ENTITY:    Remove entire entity/table
+//   - KEY:       Remove key constraints (PRIMARY, FOREIGN, UNIQUE, PARTITION, CLUSTERING)
+//   - VARIATION: Remove structural variation
+//   - RELTYPE:   Remove relationship type
+//   - INDEX:     Remove index
+//   - LABEL:     Remove label
+//
+// Example: DELETE_PS ATTRIBUTE Customer.email
+// Example: DELETE_PS PRIMARY KEY id FROM Customer
+
+delete_ps: DELETE_PS (attributeDelete | referenceDelete | embeddedDelete | entityDelete
+          | keyDelete | variationDelete | relTypeDelete | indexDelete | labelDelete);
+
+// Delete attribute: DELETE_PS ATTRIBUTE Customer.email
+attributeDelete: ATTRIBUTE qualifiedName;
+
+// Delete reference: DELETE_PS REFERENCE Customer.order_id
+referenceDelete: REFERENCE qualifiedName;
+
+// Delete embedded: DELETE_PS EMBEDDED Customer.address
+embeddedDelete: EMBEDDED qualifiedName;
+
+// Delete entity: DELETE_PS ENTITY Customer
+entityDelete: ENTITY identifier;
+
+// Delete key: DELETE_PS PRIMARY KEY id FROM Customer
+keyDelete: keyType KEY keyColumns (FROM identifier)?;
+
+// Delete variation: DELETE_PS VARIATION v1 FROM Customer
+variationDelete: VARIATION identifier FROM identifier;
+
+// Delete relationship type: DELETE_PS RELTYPE ACTED_IN
+relTypeDelete: RELTYPE identifier;
+
+// Delete index: DELETE_PS INDEX idx_name FROM Customer
+indexDelete: INDEX identifier FROM identifier;
+
+// Delete label: DELETE_PS LABEL Employee FROM Person
+labelDelete: LABEL identifier FROM identifier;
+
+// ============================================================================
+// REMOVE_PS - Generalized REMOVE operation with type parameter
+// ============================================================================
+// Non-destructive constraint removal (preserves structure, removes metadata)
+// Supports removing:
+//   - INDEX:      Remove index (for optimization)
+//   - UNIQUE KEY: Remove unique constraint (constraint relaxation)
+//   - FOREIGN KEY: Remove foreign key constraint (temporarily disable FK)
+//   - LABEL:      Remove label (graph reclassification)
+//   - VARIATION:  Remove structural variation (simplify schema)
+//
+// Example: REMOVE_PS INDEX idx_name FROM Customer
+// Example: REMOVE_PS UNIQUE KEY email FROM Customer
+
+remove_ps: REMOVE_PS (indexRemove | uniqueKeyRemove | foreignKeyRemove | labelRemove | variationRemove);
+
+// Remove index: REMOVE_PS INDEX idx_name FROM Customer
+indexRemove: INDEX identifier FROM identifier;
+
+// Remove unique key: REMOVE_PS UNIQUE KEY email FROM Customer
+uniqueKeyRemove: UNIQUE KEY keyColumns FROM identifier;
+
+// Remove foreign key: REMOVE_PS FOREIGN KEY customer_id FROM Order
+foreignKeyRemove: FOREIGN KEY keyColumns FROM identifier;
+
+// Remove label: REMOVE_PS LABEL Manager FROM Person
+labelRemove: LABEL identifier FROM identifier;
+
+// Remove variation: REMOVE_PS VARIATION v1 FROM Customer
+variationRemove: VARIATION identifier FROM identifier;
+
+// ============================================================================
+// RENAME_PS - Generalized RENAME operation with type parameter
+// ============================================================================
+// Supports renaming:
+//   - Feature (attribute/relationship): RENAME_PS FEATURE oldName TO newName IN Entity
+//   - Entity:  RENAME_PS ENTITY OldName TO NewName
+//   - RelType: RENAME_PS RELTYPE oldName TO newName (Graph database)
+//
+// Example: RENAME_PS FEATURE email TO contact_email IN Customer
+
+rename_ps: RENAME_PS (featureRename | entityRename | relTypeRename);
+
+// Rename feature: RENAME_PS FEATURE oldName TO newName IN Entity
+featureRename: FEATURE identifier TO identifier (IN identifier)?;
+
+// Rename entity: RENAME_PS ENTITY OldName TO NewName
+entityRename: ENTITY identifier TO identifier;
+
+// Rename relationship type: RENAME_PS RELTYPE oldName TO newName
+relTypeRename: RELTYPE identifier TO identifier;
+
+// ----------------------------------------------------------------------------
+// KEY TYPES - Constraint types for different database models
+// ----------------------------------------------------------------------------
+// Matches PKTypeEnum in unified_meta_schema.py (from André Conrad)
+//
+//   PRIMARY:    Standard primary key (all databases)
+//   UNIQUE:     Unique constraint (all databases)
+//   FOREIGN:    Foreign key reference (relational)
+//   PARTITION:  Partition key (Cassandra - columnar)
+//   CLUSTERING: Clustering key (Cassandra - columnar)
+//
+keyType: PRIMARY | UNIQUE | FOREIGN | PARTITION | CLUSTERING;
+keyClause: referencesClause | withColumnsClause;
+referencesClause: REFERENCES identifier LPAREN identifierList RPAREN;
+withColumnsClause: WITH COLUMNS LPAREN identifierList RPAREN;
+identifierList: identifier (COMMA identifier)*;
+
+// Variation clauses (U-Schema StructuralVariation support)
+variationClause: withAttributesClause | withRelationshipsClause | withCountClause;
+withAttributesClause: WITH ATTRIBUTES LPAREN identifierList RPAREN;
+withRelationshipsClause: WITH RELATIONSHIPS LPAREN identifierList RPAREN;
+withCountClause: WITH COUNT INTEGER_LITERAL;
+
+// RelType clauses (Graph relationship type support)
+relTypeClause: withPropertiesClause | withCardinalityClause;
+withPropertiesClause: WITH PROPERTIES LPAREN identifierList RPAREN;
+
+// ============================================================================
+// STRUCTURE OPERATIONS
+// ============================================================================
+
+// FLATTEN_PS - Unified extraction operation (MongoDB -> PostgreSQL)
+// Example: FLATTEN_PS person.address AS address
+//            GENERATE KEY address_id AS SERIAL
+//            ADD REFERENCE person_id TO person
+flatten_ps: FLATTEN_PS qualifiedName AS identifier flattenClause*;
+flattenClause: generateKeyClause | addReferenceClause | columnRenameClause;
+
+// Column rename within FLATTEN_PS (no IN entity - applies to new table only)
+// Example: RENAME value TO tag_value
+columnRenameClause: RENAME identifier TO identifier;
+
+// NEST_PS - Merge separate table into embedded document (PostgreSQL -> MongoDB)
+// Example: NEST_PS address INTO person AS address WITH CARDINALITY ONE_TO_ONE
+nest_ps: NEST_PS identifier INTO identifier AS identifier nestClause*;
+nestClause: withCardinalityClause | usingKeyClause | whereClause;
+
+// UNNEST_PS - Extract embedded document to separate table (MongoDB -> PostgreSQL)
+// Example: UNNEST_PS address FROM person
+unnest_ps: UNNEST_PS identifier FROM identifier unnestClause*;
+unnestClause: AS identifier | usingKeyClause;
+
+// EXTRACT_PS - Extract attributes from entity to create new entity
+// Example: EXTRACT_PS (a, b, c) FROM Entity INTO NewEntity
+extract_ps: EXTRACT_PS LPAREN identifierList RPAREN FROM identifier INTO identifier extractClause*;
+extractClause: generateKeyClause | addReferenceClause;
+
+// ============================================================================
+// SIMPLE OPERATIONS - All with _PS suffix
+// ============================================================================
+
+// COPY_PS: Duplicate an attribute to another location (keeps original)
+// Example: COPY_PS source TO target
+copy_ps: COPY_PS qualifiedName TO qualifiedName;
+
+// MOVE_PS: Relocate an attribute to another location (removes original)
+// Example: MOVE_PS source TO target
+move_ps: MOVE_PS qualifiedName TO qualifiedName;
+
+// MERGE_PS: Combine two entities into one new entity
+// Example: MERGE_PS A, B INTO C AS alias
+merge_ps: MERGE_PS identifier COMMA identifier INTO identifier (AS identifier)?;
+
+// SPLIT_PS: Divide one entity into two separate entities (vertical partitioning)
+// Example: SPLIT_PS User INTO Person (name, age), Account (email, password)
+split_ps: SPLIT_PS identifier INTO splitPartPs COMMA splitPartPs;
+splitPartPs: identifier LPAREN identifierList RPAREN;
+
+// CAST_PS: Change the data type of an attribute
+// Example: CAST_PS Entity.field TO Integer
+cast_ps: CAST_PS qualifiedName TO dataType;
+
+// LINKING_PS: Create a relationship link between entities
+// Example: LINKING_PS source.field TO target
+linking_ps: LINKING_PS qualifiedName TO identifier;
+
+// ============================================================================
+// SHARED CLAUSES - Reusable clause definitions
+// ============================================================================
+
+// Cardinality (relationship multiplicity)
+withCardinalityClause: WITH CARDINALITY cardinalityType;
+usingKeyClause: USING KEY identifier;
+whereClause: WHERE condition;
+addReferenceClause: ADD REFERENCE identifier TO identifier;
+
+// GENERATE KEY - Primary key generation strategies
+generateKeyClause: GENERATE KEY identifier (AS SERIAL | AS STRING PREFIX STRING_LITERAL | FROM identifier);
+
+// ============================================================================
+// COMMON TYPES - Shared type definitions
+// ============================================================================
+
+// Cardinality notation
+cardinalityType: ONE_TO_ONE | ONE_TO_MANY | ZERO_TO_ONE | ZERO_TO_MANY;
+
+// Data types
+dataType: STRING | TEXT | INT | INTEGER | LONG | DOUBLE | FLOAT | DECIMAL
+        | BOOLEAN | DATE | DATETIME | TIMESTAMP | UUID | BINARY | identifier;
+
+// Path and identifiers
+qualifiedName: pathSegment (DOT pathSegment)*;
+pathSegment: identifier (LBRACKET RBRACKET)?;
+identifier: IDENTIFIER;
+
+// Condition (simplified for schema migration)
+condition: qualifiedName EQUALS qualifiedName
+         | condition AND condition
+         | LPAREN condition RPAREN;
+
+// Literals
+literal: STRING_LITERAL | INTEGER_LITERAL | DECIMAL_LITERAL | TRUE | FALSE | NULL;
+
+// ============================================================================
+// LEXER RULES
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// KEYWORDS - Reserved words in SMEL_Pauschalisiert
+// ----------------------------------------------------------------------------
+MIGRATION: 'MIGRATION'; FROM: 'FROM'; TO: 'TO'; USING: 'USING'; AS: 'AS';
+INTO: 'INTO'; WITH: 'WITH'; WHERE: 'WHERE'; IN: 'IN'; KEY: 'KEY'; AND: 'AND';
+COUNT: 'COUNT'; ON: 'ON';
+
+// Database model types
+RELATIONAL: 'RELATIONAL'; DOCUMENT: 'DOCUMENT'; GRAPH: 'GRAPH'; COLUMNAR: 'COLUMNAR';
+
+// Generalized operations with _PS suffix
+NEST_PS: 'NEST_PS'; UNNEST_PS: 'UNNEST_PS'; FLATTEN_PS: 'FLATTEN_PS'; EXTRACT_PS: 'EXTRACT_PS';
+ADD_PS: 'ADD_PS'; DELETE_PS: 'DELETE_PS'; REMOVE_PS: 'REMOVE_PS'; RENAME_PS: 'RENAME_PS';
+COPY_PS: 'COPY_PS'; MOVE_PS: 'MOVE_PS'; MERGE_PS: 'MERGE_PS'; SPLIT_PS: 'SPLIT_PS';
+CAST_PS: 'CAST_PS'; LINKING_PS: 'LINKING_PS';
+
+// Shared keywords
+RENAME: 'RENAME'; GENERATE: 'GENERATE';
+ADD: 'ADD'; REFERENCE: 'REFERENCE';
+
+// Type parameters for generalized operations
+ATTRIBUTE: 'ATTRIBUTE'; EMBEDDED: 'EMBEDDED'; ENTITY: 'ENTITY';
+VARIATION: 'VARIATION'; RELTYPE: 'RELTYPE'; FEATURE: 'FEATURE';
+INDEX: 'INDEX'; LABEL: 'LABEL';
+
+// Key types
+PRIMARY: 'PRIMARY'; UNIQUE: 'UNIQUE'; FOREIGN: 'FOREIGN';
+PARTITION: 'PARTITION'; CLUSTERING: 'CLUSTERING';
+REFERENCES: 'REFERENCES'; COLUMNS: 'COLUMNS';
+
+// Variation and RelType clauses
+PROPERTIES: 'PROPERTIES'; STRUCTURE: 'STRUCTURE';
+ATTRIBUTES: 'ATTRIBUTES'; RELATIONSHIPS: 'RELATIONSHIPS';
+
+// Cardinality
+CARDINALITY: 'CARDINALITY';
+ONE_TO_ONE: 'ONE_TO_ONE'; ONE_TO_MANY: 'ONE_TO_MANY';
+ZERO_TO_ONE: 'ZERO_TO_ONE'; ZERO_TO_MANY: 'ZERO_TO_MANY';
+
+// Data types
+STRING: 'String'; TEXT: 'Text'; INT: 'Int'; INTEGER: 'Integer'; LONG: 'Long';
+DOUBLE: 'Double'; FLOAT: 'Float'; DECIMAL: 'Decimal'; BOOLEAN: 'Boolean';
+DATE: 'Date'; DATETIME: 'DateTime'; TIMESTAMP: 'Timestamp'; UUID: 'UUID'; BINARY: 'Binary';
+TYPE: 'TYPE'; DEFAULT: 'DEFAULT'; SERIAL: 'SERIAL'; PREFIX: 'PREFIX';
+
+// Constraints
+NOT_NULL: 'NOT NULL';
+
+// Literals
+TRUE: 'true' | 'TRUE'; FALSE: 'false' | 'FALSE'; NULL: 'null' | 'NULL';
+
+// Symbols
+COLON: ':'; COMMA: ','; DOT: '.'; LPAREN: '('; RPAREN: ')'; LBRACKET: '['; RBRACKET: ']';
+EQUALS: '=';
+
+// ----------------------------------------------------------------------------
+// PATTERNS
+// ----------------------------------------------------------------------------
+VERSION_NUMBER: [0-9]+ '.' [0-9]+ ('.' [0-9]+)?;
+INTEGER_LITERAL: [0-9]+;
+DECIMAL_LITERAL: [0-9]+ '.' [0-9]+;
+STRING_LITERAL: '\'' (~['\r\n] | '\'\'')* '\'' | '"' (~["\r\n] | '""')* '"';
+IDENTIFIER: [a-zA-Z_][a-zA-Z0-9_]*;
+
+// ----------------------------------------------------------------------------
+// SKIP - Whitespace and comments
+// ----------------------------------------------------------------------------
+LINE_COMMENT: '--' ~[\r\n]* -> skip;
+BLOCK_COMMENT: '/*' .*? '*/' -> skip;
+WS: [ \t\r\n]+ -> skip;

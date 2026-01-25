@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from core import run_migration
 
-PORT = 5573
+PORT = 5574
 
 
 class SMELHandler(SimpleHTTPRequestHandler):
@@ -550,6 +550,22 @@ def get_html():
         .attribute { display: flex; align-items: center; padding: 4px 0; font-size: 14px; }
         .attr-name { flex: 1; font-weight: 500; color: #1D1D1F; font-size: 14px; }
         .attr-type { color: #636366; font-size: 13px; }
+
+        /* Nested object styling - makes hierarchy obvious like JSON */
+        .attribute.nested-object {
+            background: #F5F5F7;
+            padding: 6px 8px;
+            border-radius: 6px;
+            margin: 4px 0;
+            font-weight: 600;
+        }
+        .attribute.nested-object .attr-type {
+            color: #AF52DE;
+            font-weight: 600;
+        }
+        .nested-level-1 { margin-left: 16px; border-left: 3px solid #E8E8ED; padding-left: 12px; }
+        .nested-level-2 { margin-left: 32px; border-left: 3px solid #D1D1D6; padding-left: 12px; }
+        .nested-level-3 { margin-left: 48px; border-left: 3px solid #C7C7CC; padding-left: 12px; }
         .attr-badge {
             font-size: 9px;
             font-weight: 600;
@@ -833,7 +849,8 @@ def get_html():
                     <option value="d2r" selected>Document &rarr; Relational</option>
                     <option value="r2r">Relational &rarr; Relational (v1 &rarr; v2)</option>
                     <option value="d2d">Document &rarr; Document (v1 &rarr; v2)</option>
-                    <option value="person_d2r">Person: MongoDB &rarr; PostgreSQL (Mini Example)</option>
+                    <option value="person_d2r_specific">Person: MongoDB &rarr; PostgreSQL (Specific Operations)</option>
+                    <option value="person_d2r_pauschalisiert">Person: MongoDB &rarr; PostgreSQL (Pauschalisiert Operations)</option>
                 </select>
             </div>
         </div>
@@ -989,24 +1006,31 @@ def get_html():
             html += '<div class="smel-panel">';
             html += '<div class="smel-panel-header">';
             html += '<span class="smel-panel-title">Parsed Operations</span>';
-            html += '<span class="smel-file-badge">' + operations.length + ' operations</span>';
+            // Show execution stats
+            const execStats = migrationData.execution_stats || {total: operations.length, success: 0, skipped: 0};
+            if (execStats.skipped > 0) {
+                html += '<span class="smel-file-badge" style="background:#f39c12;color:#fff;">' + execStats.success + '/' + execStats.total + ' OK</span>';
+            } else {
+                html += '<span class="smel-file-badge" style="background:#27ae60;color:#fff;">All ' + execStats.total + ' OK</span>';
+            }
             html += '</div>';
             html += '<div class="smel-panel-body">';
             html += '<div class="operations-list">';
 
             operations.forEach((op, index) => {
-                const changed = op.entity_count_before !== op.entity_count_after;
                 const hasChanges = op.changes && op.changes.affected_entities && op.changes.affected_entities.length > 0;
+                const isSuccess = op.status === 'success';
                 html += '<div class="operation-item">';
                 html += '<div class="operation-header">';
                 html += '<div class="operation-step">';
                 html += '<span class="step-number">' + op.step + '</span>';
-                html += '<span class="operation-type">' + op.type + '</span>';
+                html += '<span class="operation-type">' + (op.original_keyword || op.type) + '</span>';
                 html += '</div>';
-                if (changed) {
-                    html += '<span class="operation-badge changed">' + op.entity_count_before + ' → ' + op.entity_count_after + ' entities</span>';
+                // Show execution status instead of entity count
+                if (isSuccess) {
+                    html += '<span class="operation-badge" style="background:#27ae60;color:#fff;">OK</span>';
                 } else {
-                    html += '<span class="operation-badge">' + op.entity_count_after + ' entities</span>';
+                    html += '<span class="operation-badge" style="background:#e74c3c;color:#fff;">SKIP</span>';
                 }
                 html += '</div>';
                 html += '<div class="operation-params">';
@@ -1048,12 +1072,20 @@ def get_html():
             result = result.replace(/(--[^\\n]*)/g, '<span class="smel-comment">$1</span>');
 
             // Keywords
-            const keywords = ['MIGRATION', 'FROM', 'TO', 'USING', 'AS', 'INTO', 'WITH', 'WHERE', 'IN', 'KEY', 'AND',
+            const keywords = ['MIGRATION', 'FROM', 'TO', 'USING', 'AS', 'INTO', 'WITH', 'WHERE', 'IN', 'KEY', 'AND', 'FEATURE', 'GENERATE', 'PREFIX', 'SERIAL',
                 'RELATIONAL', 'DOCUMENT', 'GRAPH', 'COLUMNAR',
                 'NEST', 'UNNEST', 'FLATTEN', 'DELETE', 'ADD', 'RENAME', 'COPY', 'MOVE', 'MERGE', 'SPLIT', 'CAST', 'DROP', 'EXTRACT',
                 'REFERENCE', 'ATTRIBUTE', 'EMBEDDED', 'ENTITY', 'VARIATION', 'RELTYPE',
                 'CARDINALITY', 'ONE_TO_ONE', 'ONE_TO_MANY', 'ZERO_TO_ONE', 'ZERO_TO_MANY',
-                'PRIMARY', 'UNIQUE', 'FOREIGN', 'PARTITION', 'CLUSTERING'];
+                'PRIMARY', 'UNIQUE', 'FOREIGN', 'PARTITION', 'CLUSTERING',
+                // Specific grammar keywords
+                'ADD_ATTRIBUTE', 'ADD_REFERENCE', 'ADD_EMBEDDED', 'ADD_ENTITY', 'ADD_PRIMARY_KEY', 'ADD_FOREIGN_KEY', 'ADD_UNIQUE_KEY',
+                'DELETE_ATTRIBUTE', 'DELETE_REFERENCE', 'DELETE_EMBEDDED', 'DELETE_ENTITY',
+                'DROP_PRIMARY_KEY', 'DROP_UNIQUE_KEY', 'DROP_FOREIGN_KEY', 'DROP_VARIATION', 'DROP_RELTYPE',
+                'RENAME_FEATURE', 'RENAME_ENTITY', 'RENAME_RELTYPE',
+                // Pauschalisiert grammar keywords
+                'ADD_PS', 'DELETE_PS', 'DROP_PS', 'RENAME_PS', 'FLATTEN_PS', 'NEST_PS', 'UNNEST_PS', 'EXTRACT_PS',
+                'COPY_PS', 'MOVE_PS', 'MERGE_PS', 'SPLIT_PS', 'CAST_PS', 'LINKING_PS'];
             keywords.forEach(kw => {
                 result = result.replace(new RegExp('\\\\b' + kw + '\\\\b', 'g'), '<span class="smel-keyword">' + kw + '</span>');
             });
@@ -1206,8 +1238,7 @@ def get_html():
                     break;
                 case 'FLATTEN':
                     // Unified FLATTEN: handles embedded objects, value arrays, and M:N reference arrays
-                    html = '<span class="param-key">FLATTEN</span> ';
-                    html += '<span class="param-value">' + params.source + '</span> → ';
+                    html = '<span class="param-value">' + params.source + '</span> → ';
                     html += '<span class="param-key">AS</span> <span class="param-value">' + params.target + '</span>';
                     // Indicate PK type based on presence of GENERATE KEY clause
                     if (params.clauses) {
@@ -1216,6 +1247,26 @@ def get_html():
                             html += ' <span class="param-key">(single PK)</span>';
                         } else {
                             html += ' <span class="param-key">(composite PK)</span>';
+                        }
+                        // Show GENERATE KEY details
+                        const genKeyClause = params.clauses.find(c => c.type === 'GENERATE_KEY');
+                        if (genKeyClause) {
+                            const targetName = params.target || '';
+                            const prefix = genKeyClause.prefix || (targetName.length > 3 ? targetName.slice(0,3) + targetName.slice(-1) : targetName);
+                            html += '<div class="clause-detail" style="margin-top:4px;padding-left:12px;font-size:11px;color:#666;">';
+                            html += '├── <span style="color:#34C759;">GENERATE KEY:</span> ' + (genKeyClause.key_name || 'id');
+                            html += ' <span style="color:#888;">(prefix="' + prefix + '", format="' + prefix + '_{uuid6}")</span>';
+                            html += '</div>';
+                        }
+                        // Show ADD REFERENCE details
+                        const refClauses = params.clauses.filter(c => c.type === 'ADD_REFERENCE');
+                        if (refClauses && refClauses.length > 0) {
+                            refClauses.forEach((ref, idx) => {
+                                html += '<div class="clause-detail" style="padding-left:12px;font-size:11px;color:#666;">';
+                                const lineChar = idx === refClauses.length - 1 ? '└──' : '├──';
+                                html += lineChar + ' <span style="color:#007AFF;">ADD REFERENCE:</span> ' + (ref.ref_name || '?') + ' → ' + (ref.target || '?');
+                                html += '</div>';
+                            });
                         }
                     }
                     break;
@@ -1452,10 +1503,33 @@ def get_html():
             const refMap = {};
             entity.references.forEach(r => { refMap[r.name] = r.target; });
 
+            // Get key_registry info for this entity (with defensive checks)
+            let keyInfo = null;
+            try {
+                if (migrationData && migrationData.key_registry && migrationData.key_registry[entity.name]) {
+                    keyInfo = migrationData.key_registry[entity.name];
+                }
+            } catch(e) { keyInfo = null; }
+
             entity.attributes.forEach(a => {
                 html += '<div class="attribute"><span class="attr-name">' + a.name + '</span><span class="attr-type">' + a.type;
-                if (isSource && refMap[a.name]) {
-                    html += ' &rarr; ' + refMap[a.name];
+                // Show key format for PK with generated prefix
+                if (a.is_key && keyInfo && keyInfo.generated && keyInfo.prefix) {
+                    html += ' <span style="color:#34C759;font-size:10px;">= "' + keyInfo.prefix + '_{uuid6}"</span>';
+                }
+                // Show reference target for FK
+                if (refMap[a.name]) {
+                    let targetKeyInfo = null;
+                    try {
+                        if (migrationData && migrationData.key_registry && migrationData.key_registry[refMap[a.name]]) {
+                            targetKeyInfo = migrationData.key_registry[refMap[a.name]];
+                        }
+                    } catch(e) { targetKeyInfo = null; }
+                    if (targetKeyInfo && targetKeyInfo.prefix) {
+                        html += ' <span style="color:#007AFF;font-size:10px;">→ ' + refMap[a.name] + ' ("' + targetKeyInfo.prefix + '_...")</span>';
+                    } else {
+                        html += ' <span style="color:#007AFF;font-size:10px;">→ ' + refMap[a.name] + '</span>';
+                    }
                 }
                 html += '</span>';
                 if (a.is_key) html += '<span class="attr-badge pk">PK</span>';
@@ -1481,15 +1555,18 @@ def get_html():
             function renderAttributes(attrs, indent) {
                 let result = '';
                 attrs.forEach(a => {
-                    const indentStr = '&nbsp;'.repeat(indent * 2);
+                    const levelClass = indent > 0 ? ' nested-level-' + Math.min(indent, 3) : '';
                     if (a.nested) {
-                        // Nested object
-                        result += '<div class="attribute nested-object">' + indentStr + '<span class="attr-name">' + a.name + '</span>';
+                        // Nested object - highlighted with special styling
+                        result += '<div class="attribute nested-object' + levelClass + '">';
+                        result += '<span class="attr-name">' + a.name + '</span>';
                         result += '<span class="attr-type">{object}</span></div>';
+                        // Recursively render nested attributes with increased indent
                         result += renderAttributes(a.nested, indent + 1);
                     } else {
                         // Regular attribute
-                        result += '<div class="attribute">' + indentStr + '<span class="attr-name">' + a.name + '</span>';
+                        result += '<div class="attribute' + levelClass + '">';
+                        result += '<span class="attr-name">' + a.name + '</span>';
                         result += '<span class="attr-type">' + a.type + '</span>';
                         if (a.is_key) result += '<span class="attr-badge pk">PK</span>';
                         if (a.is_fk) result += '<span class="attr-badge fk">FK</span>';

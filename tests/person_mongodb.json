@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "person",
-  "description": "MongoDB Person document with nested address and tags array",
+  "description": "MongoDB Person document with multi-level nested objects and arrays (tests 3-level nesting)",
   "bsonType": "object",
   "required": ["_id", "name"],
   "properties": {
@@ -13,12 +13,38 @@
       "bsonType": "string",
       "description": "Person name"
     },
+    "age": {
+      "bsonType": "string",
+      "description": "Age stored as string in MongoDB"
+    },
     "address": {
       "bsonType": "object",
       "description": "Embedded address document",
       "properties": {
         "street": { "bsonType": "string" },
         "city": { "bsonType": "string" }
+      }
+    },
+    "employment": {
+      "bsonType": "object",
+      "description": "Employment information with nested company (1st level nesting)",
+      "properties": {
+        "position": { "bsonType": "string" },
+        "company": {
+          "bsonType": "object",
+          "description": "Company information with nested address (2nd level nesting)",
+          "properties": {
+            "name": { "bsonType": "string" },
+            "address": {
+              "bsonType": "object",
+              "description": "Company address (3rd level nesting - deepest)",
+              "properties": {
+                "street": { "bsonType": "string" },
+                "city": { "bsonType": "string" }
+              }
+            }
+          }
+        }
       }
     },
     "tags": {

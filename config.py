@@ -57,10 +57,17 @@ MIGRATION_CONFIGS = {
         "source_type": "Document",
         "target_type": "Document",
     },
-    # Person Mini Example (MongoDB -> PostgreSQL)
-    "person_d2r": {
+    # Person: MongoDB -> PostgreSQL (Specific Grammar)
+    "person_d2r_specific": {
         "source_file": TESTS_DIR / "person_mongodb.json",
-        "smel_file": TESTS_DIR / "person_mongo_to_pg_minibeispiel1.smel",
+        "smel_file": TESTS_DIR / "specific" / "person_mongo_to_pg_minibeispiel.smel",
+        "source_type": "Document",
+        "target_type": "Relational",
+    },
+    # Person: MongoDB -> PostgreSQL (Pauschalisiert Grammar)
+    "person_d2r_pauschalisiert": {
+        "source_file": TESTS_DIR / "person_mongodb.json",
+        "smel_file": TESTS_DIR / "pauschalisiert" / "person_mongo_to_pg_minibeispiel.smel_ps",
         "source_type": "Document",
         "target_type": "Relational",
     },
