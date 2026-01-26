@@ -16,9 +16,15 @@
  *   FROM DOCUMENT TO RELATIONAL
  *   USING person_schema:1.0
  *
+ *   -- Extract nested object to table
  *   FLATTEN person.address AS address
- *     GENERATE KEY address_id AS SERIAL
- *     ADD REFERENCE person_id TO person
+ *   ADD_PRIMARY_KEY address_id TO address
+ *   ADD_FOREIGN_KEY person_id TO address REFERENCES person(id)
+ *
+ *   -- Expand array to table
+ *   UNWIND person.tags[] INTO person_tag
+ *   ADD_PRIMARY_KEY id TO person_tag
+ *   ADD_FOREIGN_KEY person_id TO person_tag REFERENCES person(id)
  */
 grammar SMEL_Specific;
 
@@ -38,10 +44,10 @@ version: VERSION_NUMBER | INTEGER_LITERAL;                          // 1 | 1.0 |
 // ============================================================================
 // OPERATIONS - Each operation is a separate, specific keyword
 // ============================================================================
-// Structure:  NEST, UNNEST, FLATTEN, EXTRACT
-// Movement:   COPY, MOVE, MERGE, SPLIT
+// Structure:  NEST, UNNEST, FLATTEN, UNWIND, EXTRACT
+// Movement:   COPY, COPY_KEY, MOVE, MERGE, SPLIT
 // Type:       CAST, LINKING
-// CRUD:       ADD_*, DELETE_*, DROP_*, RENAME_*
+// CRUD:       ADD_*, DELETE_*, REMOVE_*, RENAME_*
 
 operation: add_attribute | add_reference | add_embedded | add_entity
          | add_primary_key | add_foreign_key | add_unique_key
@@ -54,8 +60,8 @@ operation: add_attribute | add_reference | add_embedded | add_entity
          | remove_index | remove_unique_key | remove_foreign_key
          | remove_label | remove_variation
          | rename_feature | rename_entity | rename_reltype
-         | flatten | nest | unnest | extract
-         | copy | move | merge | split | cast | linking;
+         | flatten | unwind | nest | unnest | extract
+         | copy | copy_key | move | merge | split | cast | linking;
 
 // ============================================================================
 // ADD OPERATIONS - Specific keywords for each type
@@ -89,6 +95,7 @@ withKeyClause: WITH KEY identifier;
 // ADD_PRIMARY_KEY: Add primary key constraint
 // Example: ADD_PRIMARY_KEY id TO Customer
 // Example: ADD_PRIMARY_KEY (id1, id2) TO Customer  (composite key)
+// Example: ADD_PRIMARY_KEY id TO Customer WITH TYPE UUID
 add_primary_key: ADD_PRIMARY_KEY keyColumns (TO identifier)? keyClause*;
 
 // ADD_FOREIGN_KEY: Add foreign key constraint
@@ -127,7 +134,7 @@ add_label: ADD_LABEL identifier TO identifier;
 keyColumns: identifier | LPAREN identifierList RPAREN;
 
 // Key constraint clauses
-keyClause: referencesClause | withColumnsClause;
+keyClause: referencesClause | withColumnsClause | withTypeClause;
 referencesClause: REFERENCES identifier LPAREN identifierList RPAREN;
 withColumnsClause: WITH COLUMNS LPAREN identifierList RPAREN;
 
@@ -233,16 +240,15 @@ rename_reltype: RENAME_RELTYPE identifier TO identifier;
 // STRUCTURE OPERATIONS
 // ============================================================================
 
-// FLATTEN - Unified extraction operation (MongoDB -> PostgreSQL)
+// FLATTEN - Extract nested object to separate table (non-array)
 // Example: FLATTEN person.address AS address
-//            GENERATE KEY address_id AS SERIAL
-//            ADD REFERENCE person_id TO person
-flatten: FLATTEN qualifiedName AS identifier flattenClause*;
-flattenClause: generateKeyClause | addReferenceClause | columnRenameClause;
+// Note: Use separate ADD_PRIMARY_KEY, ADD_FOREIGN_KEY operations for constraints
+flatten: FLATTEN qualifiedName AS identifier;
 
-// Column rename within FLATTEN (no IN entity - applies to new table only)
-// Example: RENAME value TO tag_value
-columnRenameClause: RENAME identifier TO identifier;
+// UNWIND - Expand array field into separate table
+// Example: UNWIND person.tags[] INTO person_tag
+// Note: Use separate ADD_PRIMARY_KEY, ADD_FOREIGN_KEY, RENAME_FEATURE for constraints
+unwind: UNWIND qualifiedName INTO identifier;
 
 // NEST - Merge separate table into embedded document (PostgreSQL -> MongoDB)
 // Example: NEST address INTO person AS address WITH CARDINALITY ONE_TO_ONE
@@ -256,8 +262,8 @@ unnestClause: AS identifier | usingKeyClause;
 
 // EXTRACT - Extract attributes from entity to create new entity
 // Example: EXTRACT (a, b, c) FROM Entity INTO NewEntity
-extract: EXTRACT LPAREN identifierList RPAREN FROM identifier INTO identifier extractClause*;
-extractClause: generateKeyClause | addReferenceClause;
+// Note: Use separate ADD_PRIMARY_KEY, ADD_FOREIGN_KEY operations for constraints
+extract: EXTRACT LPAREN identifierList RPAREN FROM identifier INTO identifier;
 
 // ============================================================================
 // SIMPLE OPERATIONS
@@ -266,6 +272,12 @@ extractClause: generateKeyClause | addReferenceClause;
 // COPY: Duplicate an attribute to another location (keeps original)
 // Example: COPY source TO target
 copy: COPY qualifiedName TO qualifiedName;
+
+// COPY_KEY: Copy primary key value to another table (optionally as foreign key)
+// Example: COPY_KEY person.id TO person_tag.person_id
+// Example: COPY_KEY person.id TO person_tag.person_id AS FOREIGN KEY
+copy_key: COPY_KEY qualifiedName TO qualifiedName copyKeyClause?;
+copyKeyClause: AS FOREIGN KEY;
 
 // MOVE: Relocate an attribute to another location (removes original)
 // Example: MOVE source TO target
@@ -296,10 +308,6 @@ linking: LINKING qualifiedName TO identifier;
 withCardinalityClause: WITH CARDINALITY cardinalityType;
 usingKeyClause: USING KEY identifier;
 whereClause: WHERE condition;
-addReferenceClause: ADD REFERENCE identifier TO identifier;
-
-// GENERATE KEY - Primary key generation strategies
-generateKeyClause: GENERATE KEY identifier (AS SERIAL | AS STRING PREFIX STRING_LITERAL | FROM identifier);
 
 // Variation clauses (U-Schema StructuralVariation support)
 variationClause: withAttributesClause | withRelationshipsClause | withCountClause;
@@ -353,10 +361,10 @@ COUNT: 'COUNT'; ON: 'ON';
 RELATIONAL: 'RELATIONAL'; DOCUMENT: 'DOCUMENT'; GRAPH: 'GRAPH'; COLUMNAR: 'COLUMNAR';
 
 // Structure operations
-NEST: 'NEST'; UNNEST: 'UNNEST'; FLATTEN: 'FLATTEN'; EXTRACT: 'EXTRACT';
+NEST: 'NEST'; UNNEST: 'UNNEST'; FLATTEN: 'FLATTEN'; EXTRACT: 'EXTRACT'; UNWIND: 'UNWIND';
 
 // Simple operations
-COPY: 'COPY'; MOVE: 'MOVE'; MERGE: 'MERGE'; SPLIT: 'SPLIT'; CAST: 'CAST'; LINKING: 'LINKING';
+COPY: 'COPY'; COPY_KEY: 'COPY_KEY'; MOVE: 'MOVE'; MERGE: 'MERGE'; SPLIT: 'SPLIT'; CAST: 'CAST'; LINKING: 'LINKING';
 
 // ADD operations - specific keywords
 ADD_ATTRIBUTE: 'ADD_ATTRIBUTE';
@@ -401,8 +409,7 @@ RENAME_ENTITY: 'RENAME_ENTITY';
 RENAME_RELTYPE: 'RENAME_RELTYPE';
 
 // Shared keywords
-RENAME: 'RENAME'; GENERATE: 'GENERATE';
-ADD: 'ADD'; REFERENCE: 'REFERENCE';
+RENAME: 'RENAME';
 
 // RelType (Graph relationship types)
 RELTYPE: 'RELTYPE'; PROPERTIES: 'PROPERTIES'; STRUCTURE: 'STRUCTURE';

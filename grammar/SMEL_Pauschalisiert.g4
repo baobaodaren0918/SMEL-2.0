@@ -16,9 +16,15 @@
  *   FROM DOCUMENT TO RELATIONAL
  *   USING person_schema:1.0
  *
+ *   -- Extract nested object to table
  *   FLATTEN_PS person.address AS address
- *     GENERATE KEY address_id AS SERIAL
- *     ADD REFERENCE person_id TO person
+ *   ADD_PS PRIMARY KEY address_id TO address
+ *   ADD_PS FOREIGN KEY person_id TO address REFERENCES person(id)
+ *
+ *   -- Expand array to table
+ *   UNWIND_PS person.tags[] INTO person_tag
+ *   ADD_PS PRIMARY KEY id TO person_tag
+ *   ADD_PS FOREIGN KEY person_id TO person_tag REFERENCES person(id)
  */
 grammar SMEL_Pauschalisiert;
 
@@ -38,13 +44,13 @@ version: VERSION_NUMBER | INTEGER_LITERAL;                          // 1 | 1.0 |
 // ============================================================================
 // OPERATIONS - Generalized operations with parameters
 // ============================================================================
-// Structure:  NEST_PS, UNNEST_PS, FLATTEN_PS, EXTRACT_PS
-// Movement:   COPY_PS, MOVE_PS, MERGE_PS, SPLIT_PS
+// Structure:  NEST_PS, UNNEST_PS, FLATTEN_PS, UNWIND_PS, EXTRACT_PS
+// Movement:   COPY_PS, COPY_KEY_PS, MOVE_PS, MERGE_PS, SPLIT_PS
 // Type:       CAST_PS, LINKING_PS
-// CRUD:       ADD_PS, DELETE_PS, DROP_PS, RENAME_PS
+// CRUD:       ADD_PS, DELETE_PS, REMOVE_PS, RENAME_PS
 
-operation: nest_ps | unnest_ps | flatten_ps
-         | copy_ps | move_ps | merge_ps | split_ps | cast_ps | linking_ps | extract_ps
+operation: nest_ps | unnest_ps | flatten_ps | unwind_ps
+         | copy_ps | copy_key_ps | move_ps | merge_ps | split_ps | cast_ps | linking_ps | extract_ps
          | add_ps | delete_ps | remove_ps | rename_ps;
 
 // ============================================================================
@@ -87,7 +93,9 @@ entityClause: withAttributesClause | withKeyClause;
 withKeyClause: WITH KEY identifier;
 
 // Add key: ADD_PS PRIMARY KEY id TO Customer OR ADD_PS PRIMARY KEY (id1, id2) TO Customer
+// Example: ADD_PS PRIMARY KEY id TO Customer WITH TYPE UUID
 keyAdd: keyType KEY keyColumns (TO identifier)? keyClause*;
+// Note: WITH TYPE clause is primarily for PRIMARY KEY (auto-generated keys like UUID, SERIAL)
 
 // Key columns - single identifier or parenthesized list for composite keys
 keyColumns: identifier | LPAREN identifierList RPAREN;
@@ -215,7 +223,7 @@ relTypeRename: RELTYPE identifier TO identifier;
 //   CLUSTERING: Clustering key (Cassandra - columnar)
 //
 keyType: PRIMARY | UNIQUE | FOREIGN | PARTITION | CLUSTERING;
-keyClause: referencesClause | withColumnsClause;
+keyClause: referencesClause | withColumnsClause | withTypeClause;
 referencesClause: REFERENCES identifier LPAREN identifierList RPAREN;
 withColumnsClause: WITH COLUMNS LPAREN identifierList RPAREN;
 identifierList: identifier (COMMA identifier)*;
@@ -234,16 +242,15 @@ withPropertiesClause: WITH PROPERTIES LPAREN identifierList RPAREN;
 // STRUCTURE OPERATIONS
 // ============================================================================
 
-// FLATTEN_PS - Unified extraction operation (MongoDB -> PostgreSQL)
+// FLATTEN_PS - Extract nested object to separate table (non-array)
 // Example: FLATTEN_PS person.address AS address
-//            GENERATE KEY address_id AS SERIAL
-//            ADD REFERENCE person_id TO person
-flatten_ps: FLATTEN_PS qualifiedName AS identifier flattenClause*;
-flattenClause: generateKeyClause | addReferenceClause | columnRenameClause;
+// Note: Use separate ADD_PS PRIMARY KEY, ADD_PS FOREIGN KEY operations for constraints
+flatten_ps: FLATTEN_PS qualifiedName AS identifier;
 
-// Column rename within FLATTEN_PS (no IN entity - applies to new table only)
-// Example: RENAME value TO tag_value
-columnRenameClause: RENAME identifier TO identifier;
+// UNWIND_PS - Expand array field into separate table
+// Example: UNWIND_PS person.tags[] INTO person_tag
+// Note: Use separate ADD_PS PRIMARY KEY, ADD_PS FOREIGN KEY, RENAME_PS FEATURE for constraints
+unwind_ps: UNWIND_PS qualifiedName INTO identifier;
 
 // NEST_PS - Merge separate table into embedded document (PostgreSQL -> MongoDB)
 // Example: NEST_PS address INTO person AS address WITH CARDINALITY ONE_TO_ONE
@@ -257,8 +264,8 @@ unnestClause: AS identifier | usingKeyClause;
 
 // EXTRACT_PS - Extract attributes from entity to create new entity
 // Example: EXTRACT_PS (a, b, c) FROM Entity INTO NewEntity
-extract_ps: EXTRACT_PS LPAREN identifierList RPAREN FROM identifier INTO identifier extractClause*;
-extractClause: generateKeyClause | addReferenceClause;
+// Note: Use separate ADD_PS PRIMARY KEY, ADD_PS FOREIGN KEY operations for constraints
+extract_ps: EXTRACT_PS LPAREN identifierList RPAREN FROM identifier INTO identifier;
 
 // ============================================================================
 // SIMPLE OPERATIONS - All with _PS suffix
@@ -267,6 +274,12 @@ extractClause: generateKeyClause | addReferenceClause;
 // COPY_PS: Duplicate an attribute to another location (keeps original)
 // Example: COPY_PS source TO target
 copy_ps: COPY_PS qualifiedName TO qualifiedName;
+
+// COPY_KEY_PS: Copy primary key value to another table (optionally as foreign key)
+// Example: COPY_KEY_PS person.id TO person_tag.person_id
+// Example: COPY_KEY_PS person.id TO person_tag.person_id AS FOREIGN KEY
+copy_key_ps: COPY_KEY_PS qualifiedName TO qualifiedName copyKeyClause?;
+copyKeyClause: AS FOREIGN KEY;
 
 // MOVE_PS: Relocate an attribute to another location (removes original)
 // Example: MOVE_PS source TO target
@@ -297,10 +310,6 @@ linking_ps: LINKING_PS qualifiedName TO identifier;
 withCardinalityClause: WITH CARDINALITY cardinalityType;
 usingKeyClause: USING KEY identifier;
 whereClause: WHERE condition;
-addReferenceClause: ADD REFERENCE identifier TO identifier;
-
-// GENERATE KEY - Primary key generation strategies
-generateKeyClause: GENERATE KEY identifier (AS SERIAL | AS STRING PREFIX STRING_LITERAL | FROM identifier);
 
 // ============================================================================
 // COMMON TYPES - Shared type definitions
@@ -342,13 +351,13 @@ RELATIONAL: 'RELATIONAL'; DOCUMENT: 'DOCUMENT'; GRAPH: 'GRAPH'; COLUMNAR: 'COLUM
 
 // Generalized operations with _PS suffix
 NEST_PS: 'NEST_PS'; UNNEST_PS: 'UNNEST_PS'; FLATTEN_PS: 'FLATTEN_PS'; EXTRACT_PS: 'EXTRACT_PS';
+UNWIND_PS: 'UNWIND_PS';
 ADD_PS: 'ADD_PS'; DELETE_PS: 'DELETE_PS'; REMOVE_PS: 'REMOVE_PS'; RENAME_PS: 'RENAME_PS';
-COPY_PS: 'COPY_PS'; MOVE_PS: 'MOVE_PS'; MERGE_PS: 'MERGE_PS'; SPLIT_PS: 'SPLIT_PS';
+COPY_PS: 'COPY_PS'; COPY_KEY_PS: 'COPY_KEY_PS'; MOVE_PS: 'MOVE_PS'; MERGE_PS: 'MERGE_PS'; SPLIT_PS: 'SPLIT_PS';
 CAST_PS: 'CAST_PS'; LINKING_PS: 'LINKING_PS';
 
 // Shared keywords
-RENAME: 'RENAME'; GENERATE: 'GENERATE';
-ADD: 'ADD'; REFERENCE: 'REFERENCE';
+RENAME: 'RENAME';
 
 // Type parameters for generalized operations
 ATTRIBUTE: 'ATTRIBUTE'; EMBEDDED: 'EMBEDDED'; ENTITY: 'ENTITY';
