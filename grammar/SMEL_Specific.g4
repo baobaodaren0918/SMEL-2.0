@@ -61,7 +61,8 @@ operation: add_attribute | add_reference | add_embedded | add_entity
          | remove_label | remove_variation
          | rename_feature | rename_entity | rename_reltype
          | flatten | unwind | nest | unnest | extract
-         | copy | copy_key | move | merge | split | cast | linking;
+         | copy | copy_key | move | merge | split | cast | linking
+;
 
 // ============================================================================
 // ADD OPERATIONS - Specific keywords for each type
@@ -75,9 +76,10 @@ withTypeClause: WITH TYPE dataType;
 withDefaultClause: WITH DEFAULT literal;
 notNullClause: NOT_NULL;
 
-// ADD_REFERENCE: Add foreign key relationship
-// Example: ADD_REFERENCE customer_id TO Order WITH CARDINALITY ONE_TO_MANY
-add_reference: ADD_REFERENCE qualifiedName TO identifier referenceClause*;
+// ADD_REFERENCE: Add foreign key relationship (SQL-style) with explicit entity.field
+// Example: ADD_REFERENCE address.person_id REFERENCES person(person_id)
+// Example: ADD_REFERENCE order.customer_id REFERENCES customer(id) WITH CARDINALITY ONE_TO_MANY
+add_reference: ADD_REFERENCE qualifiedName REFERENCES identifier LPAREN identifier RPAREN referenceClause*;
 referenceClause: withCardinalityClause | usingKeyClause | whereClause;
 
 // ADD_EMBEDDED: Add embedded object relationship (MongoDB style)
@@ -93,10 +95,12 @@ entityClause: withAttributesClause | withKeyClause;
 withKeyClause: WITH KEY identifier;
 
 // ADD_PRIMARY_KEY: Add primary key constraint
-// Example: ADD_PRIMARY_KEY id TO Customer
+// Example: ADD_PRIMARY_KEY address.address_id AS String  (new explicit entity.field syntax)
 // Example: ADD_PRIMARY_KEY (id1, id2) TO Customer  (composite key)
-// Example: ADD_PRIMARY_KEY id TO Customer WITH TYPE UUID
-add_primary_key: ADD_PRIMARY_KEY keyColumns (TO identifier)? keyClause*;
+// Example: ADD_PRIMARY_KEY id TO Customer WITH TYPE UUID (legacy TO syntax)
+// Note: AS dataType is a simplified alternative to WITH TYPE dataType
+// Note: keyColumns now supports qualifiedName (entity.field) for explicit entity specification
+add_primary_key: ADD_PRIMARY_KEY keyColumns (AS dataType)? (TO identifier)? keyClause*;
 
 // ADD_FOREIGN_KEY: Add foreign key constraint
 // Example: ADD_FOREIGN_KEY customer_id TO Order REFERENCES Customer(id)
@@ -130,8 +134,8 @@ add_index: ADD_INDEX identifier ON identifier LPAREN identifierList RPAREN;
 // Example: ADD_LABEL Employee TO Person
 add_label: ADD_LABEL identifier TO identifier;
 
-// Key columns - single identifier or parenthesized list for composite keys
-keyColumns: identifier | LPAREN identifierList RPAREN;
+// Key columns - qualifiedName (entity.field) or parenthesized list for composite keys
+keyColumns: qualifiedName | LPAREN identifierList RPAREN;
 
 // Key constraint clauses
 keyClause: referencesClause | withColumnsClause | withTypeClause;
@@ -422,7 +426,7 @@ INDEX: 'INDEX'; LABEL: 'LABEL';
 // Key types
 PRIMARY: 'PRIMARY'; UNIQUE: 'UNIQUE'; FOREIGN: 'FOREIGN';
 PARTITION: 'PARTITION'; CLUSTERING: 'CLUSTERING';
-REFERENCES: 'REFERENCES'; COLUMNS: 'COLUMNS';
+REFERENCE: 'REFERENCE'; REFERENCES: 'REFERENCES'; COLUMNS: 'COLUMNS';
 
 // Variation clauses
 ATTRIBUTES: 'ATTRIBUTES'; RELATIONSHIPS: 'RELATIONSHIPS';

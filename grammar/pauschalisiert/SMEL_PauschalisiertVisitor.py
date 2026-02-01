@@ -309,13 +309,8 @@ class SMEL_PauschalisiertVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SMEL_PauschalisiertParser#flattenClause.
-    def visitFlattenClause(self, ctx:SMEL_PauschalisiertParser.FlattenClauseContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SMEL_PauschalisiertParser#columnRenameClause.
-    def visitColumnRenameClause(self, ctx:SMEL_PauschalisiertParser.ColumnRenameClauseContext):
+    # Visit a parse tree produced by SMEL_PauschalisiertParser#unwind_ps.
+    def visitUnwind_ps(self, ctx:SMEL_PauschalisiertParser.Unwind_psContext):
         return self.visitChildren(ctx)
 
 
@@ -344,13 +339,18 @@ class SMEL_PauschalisiertVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SMEL_PauschalisiertParser#extractClause.
-    def visitExtractClause(self, ctx:SMEL_PauschalisiertParser.ExtractClauseContext):
+    # Visit a parse tree produced by SMEL_PauschalisiertParser#copy_ps.
+    def visitCopy_ps(self, ctx:SMEL_PauschalisiertParser.Copy_psContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SMEL_PauschalisiertParser#copy_ps.
-    def visitCopy_ps(self, ctx:SMEL_PauschalisiertParser.Copy_psContext):
+    # Visit a parse tree produced by SMEL_PauschalisiertParser#copy_key_ps.
+    def visitCopy_key_ps(self, ctx:SMEL_PauschalisiertParser.Copy_key_psContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SMEL_PauschalisiertParser#copyKeyClause.
+    def visitCopyKeyClause(self, ctx:SMEL_PauschalisiertParser.CopyKeyClauseContext):
         return self.visitChildren(ctx)
 
 
@@ -396,16 +396,6 @@ class SMEL_PauschalisiertVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SMEL_PauschalisiertParser#whereClause.
     def visitWhereClause(self, ctx:SMEL_PauschalisiertParser.WhereClauseContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SMEL_PauschalisiertParser#addReferenceClause.
-    def visitAddReferenceClause(self, ctx:SMEL_PauschalisiertParser.AddReferenceClauseContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SMEL_PauschalisiertParser#generateKeyClause.
-    def visitGenerateKeyClause(self, ctx:SMEL_PauschalisiertParser.GenerateKeyClauseContext):
         return self.visitChildren(ctx)
 
 

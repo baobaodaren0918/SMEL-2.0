@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from core import run_migration
 
-PORT = 5574
+PORT = 5575
 
 
 class SMELHandler(SimpleHTTPRequestHandler):
@@ -845,12 +845,8 @@ def get_html():
             <span class="control-label">Migration Direction</span>
             <div class="dropdown">
                 <select id="directionSelect">
-                    <option value="r2d">Relational &rarr; Document</option>
-                    <option value="d2r" selected>Document &rarr; Relational</option>
-                    <option value="r2r">Relational &rarr; Relational (v1 &rarr; v2)</option>
-                    <option value="d2d">Document &rarr; Document (v1 &rarr; v2)</option>
                     <option value="person_d2r_specific">Person: MongoDB &rarr; PostgreSQL (Specific Operations)</option>
-                    <option value="person_d2r_pauschalisiert">Person: MongoDB &rarr; PostgreSQL (Pauschalisiert Operations)</option>
+                    <option value="person_d2r_pauschalisiert" selected>Person: MongoDB &rarr; PostgreSQL (Pauschalisiert Operations)</option>
                 </select>
             </div>
         </div>
@@ -1270,12 +1266,18 @@ def get_html():
                         }
                     }
                     break;
+                case 'UNWIND':
+                    // UNWIND: Expand array into separate table
+                    html = '<span class="param-value">' + params.source + '</span> → ';
+                    html += '<span class="param-key">INTO</span> <span class="param-value">' + params.target + '</span>';
+                    break;
                 case 'ADD_KEY':
-                    html = '<span class="param-key">key_type:</span> <span class="param-value">' + params.key_type + '</span> ';
+                    html = '<span class="param-key">key_type:</span> <span class="param-value">' + (params.key_type || 'PRIMARY') + '</span> ';
                     if (params.key_columns) {
                         const cols = params.key_columns.length > 1 ? '(' + params.key_columns.join(', ') + ')' : params.key_columns[0];
                         html += '<span class="param-key">columns:</span> <span class="param-value">' + cols + '</span>';
                     }
+                    if (params.data_type) html += ' <span class="param-key">AS</span> <span class="param-value">' + params.data_type + '</span>';
                     if (params.entity) html += ' <span class="param-key">TO</span> <span class="param-value">' + params.entity + '</span>';
                     break;
                 case 'DROP_KEY':
@@ -1287,8 +1289,15 @@ def get_html():
                     if (params.entity) html += ' <span class="param-key">FROM</span> <span class="param-value">' + params.entity + '</span>';
                     break;
                 case 'ADD_REFERENCE':
-                    html = '<span class="param-key">reference:</span> <span class="param-value">' + params.reference + '</span> → ';
-                    html += '<span class="param-key">target:</span> <span class="param-value">' + params.target + '</span>';
+                    // New syntax: field_name REFERENCES target_table(target_column)
+                    if (params.field_name) {
+                        html = '<span class="param-key">field:</span> <span class="param-value">' + params.field_name + '</span> ';
+                        html += '<span class="param-key">REFERENCES</span> <span class="param-value">' + params.target_table + '(' + params.target_column + ')</span>';
+                    } else {
+                        // Fallback to old syntax
+                        html = '<span class="param-key">reference:</span> <span class="param-value">' + params.reference + '</span> → ';
+                        html += '<span class="param-key">target:</span> <span class="param-value">' + params.target + '</span>';
+                    }
                     break;
                 case 'DELETE_EMBEDDED':
                     html = '<span class="param-key">embedded:</span> <span class="param-value">' + params.embedded + '</span>';
@@ -1328,7 +1337,16 @@ def get_html():
                     const safeAttr = attr.name.replace(/[^a-zA-Z0-9_]/g, '_');
                     const safeType = attr.type.replace(/[^a-zA-Z0-9_]/g, '_');
                     const isFk = (entity.references || []).some(r => r.name === attr.name);
-                    let key = attr.is_key ? ' PK' : (isFk ? ' FK' : '');
+                    // Mermaid only supports one key type, PK takes precedence
+                    // If both PK and FK, show PK with comment indicating FK
+                    let key = '';
+                    if (attr.is_key && isFk) {
+                        key = ' PK "FK"';  // Composite PK that is also FK
+                    } else if (attr.is_key) {
+                        key = ' PK';
+                    } else if (isFk) {
+                        key = ' FK';
+                    }
                     syntax += '        ' + safeAttr + ' ' + safeType + key + '\\n';
                 });
                 syntax += '    }\\n';
@@ -1338,10 +1356,23 @@ def get_html():
                 const src = entity.name.replace(/[^a-zA-Z0-9_]/g, '_');
                 (entity.references || []).forEach(ref => {
                     const tgt = ref.target.replace(/[^a-zA-Z0-9_]/g, '_');
-                    const key = tgt + '-' + src;
+                    const key = tgt + '-' + src + '-' + ref.name;
                     if (!addedRels.has(key)) {
                         addedRels.add(key);
-                        syntax += '    ' + tgt + ' ||--o{ ' + src + ' : "' + ref.name + '"\\n';
+                        // Use cardinality from reference to determine ER notation
+                        // Cardinality values from unified_meta_schema.py:
+                        // ONE_TO_ONE = "1..1", ONE_TO_MANY = "1..n"
+                        // ZERO_TO_ONE = "0..1", ZERO_TO_MANY = "0..n"
+                        const cardinality = ref.cardinality || '1..n';
+                        let relSymbol = '||--o{'; // default: ONE_TO_MANY (1..n)
+                        if (cardinality === '1..1') {
+                            relSymbol = '||--||';  // ONE_TO_ONE
+                        } else if (cardinality === '0..1') {
+                            relSymbol = '|o--||';  // ZERO_TO_ONE
+                        } else if (cardinality === '0..n') {
+                            relSymbol = '|o--o{';  // ZERO_TO_MANY
+                        }
+                        syntax += '    ' + tgt + ' ' + relSymbol + ' ' + src + ' : "' + ref.name + '"\\n';
                     }
                 });
                 (entity.embedded || []).forEach(emb => {
@@ -1349,8 +1380,8 @@ def get_html():
                     const key = src + '-' + tgt;
                     if (!addedRels.has(key)) {
                         addedRels.add(key);
-                        const rel = emb.cardinality === 'ONE_TO_ONE' ? '||--||' : '||--o{';
-                        syntax += '    ' + src + ' ' + rel + ' ' + tgt + ' : "1:N"\\n';
+                        const rel = emb.cardinality === '1..1' ? '||--||' : '||--o{';
+                        syntax += '    ' + src + ' ' + rel + ' ' + tgt + ' : "embedded"\\n';
                     }
                 });
             });
@@ -1401,7 +1432,7 @@ def get_html():
 
             // Meta V1 and Meta V2 entities (must be aligned)
             const metaEntities = new Set([...Object.keys(migrationData.meta_v1), ...Object.keys(migrationData.result)]);
-            const newEntities = new Set(migrationData.changes.filter(c => c.startsWith('FLATTEN:') || c.startsWith('NEST:')).map(c => c.split(':')[1]));
+            const newEntities = new Set(migrationData.changes.filter(c => c.startsWith('FLATTEN:') || c.startsWith('NEST:') || c.startsWith('UNWIND:')).map(c => c.split(':')[1]));
 
             // Source entities (independent)
             const sourceEntities = Object.values(migrationData.source);

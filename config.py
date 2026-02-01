@@ -29,34 +29,6 @@ GRAMMAR_DIR = BASE_DIR / "grammar"
 # Define available migration scenarios with their source/target files
 
 MIGRATION_CONFIGS = {
-    # Relational to Document (PostgreSQL -> MongoDB)
-    "r2d": {
-        "source_file": SCHEMA_DIR / "pain001_postgresql.sql",
-        "smel_file": TESTS_DIR / "pg_to_mongo.smel",
-        "source_type": "Relational",
-        "target_type": "Document",
-    },
-    # Document to Relational (MongoDB -> PostgreSQL)
-    "d2r": {
-        "source_file": SCHEMA_DIR / "pain001_mongodb.json",
-        "smel_file": TESTS_DIR / "mongo_to_pg.smel",
-        "source_type": "Document",
-        "target_type": "Relational",
-    },
-    # Relational to Relational (SQL v1 -> v2)
-    "r2r": {
-        "source_file": SCHEMA_DIR / "pain001_postgresql.sql",
-        "smel_file": TESTS_DIR / "sql_v1_to_v2.smel",
-        "source_type": "Relational",
-        "target_type": "Relational",
-    },
-    # Document to Document (MongoDB v1 -> v2)
-    "d2d": {
-        "source_file": SCHEMA_DIR / "pain001_mongodb.json",
-        "smel_file": TESTS_DIR / "mongo_v1_to_v2.smel",
-        "source_type": "Document",
-        "target_type": "Document",
-    },
     # Person: MongoDB -> PostgreSQL (Specific Grammar)
     "person_d2r_specific": {
         "source_file": TESTS_DIR / "person_mongodb.json",
@@ -72,10 +44,6 @@ MIGRATION_CONFIGS = {
         "target_type": "Relational",
     },
 }
-
-# Backward compatibility aliases
-MIGRATION_CONFIGS["1"] = MIGRATION_CONFIGS["r2d"]
-MIGRATION_CONFIGS["2"] = MIGRATION_CONFIGS["d2r"]
 
 
 # =============================================================================

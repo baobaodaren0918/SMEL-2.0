@@ -1,8 +1,8 @@
 -- SMEL Mini-Example: MongoDB -> PostgreSQL (Pauschalisiert Operations Version)
 -- Person Document (multi-level nested objects + arrays) -> Normalized Tables
 -- Direction: Denormalized (Embedded) -> Normalized (3NF)
--- Tests: Multiple operation types (FLATTEN, CAST, RENAME)
--- Syntax: SMEL_Pauschalisiert.g4
+-- Tests: Multiple operation types (FLATTEN, COPY, UNWIND, CAST, RENAME)
+-- Syntax: SMEL_Pauschalisiert.g4 with explicit entity.field syntax
 
 MIGRATION person_mongo_to_pg:1.0
 FROM DOCUMENT TO RELATIONAL
@@ -15,100 +15,109 @@ USING person_schema:1
 --   _id: "p001",
 --   name: "Zhang San",
 --   age: "28",                              -- Note: stored as string in MongoDB
---   address: {
+--   address: {                              -- Embedded object (1:1)
 --     street: "Hauptstrasse 10",
 --     city: "Berlin"
 --   },
---   employment: {
+--   employment: {                           -- Embedded object (1:1)
 --     position: "Software Engineer",
---     company: {
+--     company: {                            -- Embedded object (1:1)
 --       name: "Tech Corp",
---       address: {
+--       address: {                          -- Embedded object (1:1)
 --         street: "Business Str 5",
 --         city: "Munich"
 --       }
 --     }
 --   },
---   tags: ["student", "developer"],
---   knows: ["p002", "p003"]
+--   tags: ["student", "developer"],         -- Array (1:N)
+--   knows: ["p002", "p003"]                 -- Array M:N relationship
 -- }
 
 -- ============================================
 -- Target: PostgreSQL 3NF Tables
 -- ============================================
--- person (id, name, age)                    -- age: INTEGER
--- address (id, street, city, person_id)
--- employment (id, position, person_id)
--- company (id, name, employment_id)
--- company_address (id, street, city, company_id)
--- person_tag (id, tag_value, person_id)
+-- person (person_id, name, age)                    -- age: INTEGER
+-- address (address_id, street, city, person_id)
+-- employment (employment_id, position, person_id)
+-- company (company_id, name, employment_id)
+-- company_address (company_address_id, street, city, company_id)
+-- person_tag (person_tag_id, tag_value, person_id)
 -- person_knows (person_id, knows_person_id)
 
 -- ============================================
--- Step 1: FLATTEN_PS - Extract address embedded object
+-- Step 1: RENAME_PS - Rename _id to person_id
 -- ============================================
--- Extracts embedded 'address' document into separate 'address' table
+-- Do this first so all subsequent REFERENCES use person_id
 
-FLATTEN_PS person.address AS address
-    GENERATE KEY id AS String PREFIX "addr"
-    ADD REFERENCE person_id TO person
+RENAME_PS FEATURE _id TO person_id IN person
 
 -- ============================================
--- Step 2: FLATTEN_PS - Extract employment embedded object
+-- Step 2: CAST_PS - Type conversion
 -- ============================================
--- Extracts embedded 'employment' document (contains position, company)
-
-FLATTEN_PS person.employment AS employment
-    GENERATE KEY id AS String PREFIX "emp"
-    ADD REFERENCE person_id TO person
-
--- ============================================
--- Step 3: FLATTEN_PS - Extract company from employment
--- ============================================
--- Extracts nested company object from employment (2nd level nesting)
-
-FLATTEN_PS employment.company AS company
-    GENERATE KEY id AS String PREFIX "comp"
-    ADD REFERENCE employment_id TO employment
-
--- ============================================
--- Step 4: FLATTEN_PS - Extract company address (3rd level nesting)
--- ============================================
--- Demonstrates 3-level deep nesting: person.employment.company.address
-
-FLATTEN_PS company.address AS company_address
-    GENERATE KEY id AS String PREFIX "caddr"
-    ADD REFERENCE company_id TO company
-
--- ============================================
--- Step 5: FLATTEN_PS - Expand tags array into table
--- ============================================
--- Expands value array into separate person_tag table
-
-FLATTEN_PS person.tags[] AS person_tag
-    GENERATE KEY id AS String PREFIX "t"
-    ADD REFERENCE person_id TO person
-    RENAME value TO tag_value
-
--- ============================================
--- Step 6: FLATTEN_PS - Expand knows array into M:N join table
--- ============================================
--- No GENERATE KEY -> composite primary key
-
-FLATTEN_PS person.knows[] AS person_knows
-    ADD REFERENCE person_id TO person
-    ADD REFERENCE knows_person_id TO person
-
--- ============================================
--- Step 7: CAST_PS - Type conversion
--- ============================================
--- MongoDB stores age as string, PostgreSQL needs INTEGER
 
 CAST_PS person.age TO Integer
 
 -- ============================================
--- Step 8: RENAME_PS - Rename _id to id
+-- Step 3: FLATTEN_PS - Extract address (1st level)
 -- ============================================
--- PostgreSQL naming convention: no underscore prefix
+-- Source: embedded object (1:1) -> ONE_TO_ONE relationship
 
-RENAME_PS FEATURE _id TO id IN person
+FLATTEN_PS person.address AS address
+COPY_PS person.address.street TO address.street
+COPY_PS person.address.city TO address.city
+ADD_PS KEY address.address_id AS String
+ADD_PS REFERENCE address.person_id REFERENCES person(person_id) WITH CARDINALITY ONE_TO_ONE
+
+-- ============================================
+-- Step 4: FLATTEN_PS - Extract employment (1st level)
+-- ============================================
+-- Source: embedded object (1:1) -> ONE_TO_ONE relationship
+
+FLATTEN_PS person.employment AS employment
+COPY_PS person.employment.position TO employment.position
+ADD_PS KEY employment.employment_id AS String
+ADD_PS REFERENCE employment.person_id REFERENCES person(person_id) WITH CARDINALITY ONE_TO_ONE
+
+-- ============================================
+-- Step 5: FLATTEN_PS - Extract company (2nd level)
+-- ============================================
+-- Source: embedded object (1:1) -> ONE_TO_ONE relationship
+-- Note: Use FULL PATH from original source
+
+FLATTEN_PS person.employment.company AS company
+COPY_PS person.employment.company.name TO company.name
+ADD_PS KEY company.company_id AS String
+ADD_PS REFERENCE company.employment_id REFERENCES employment(employment_id) WITH CARDINALITY ONE_TO_ONE
+
+-- ============================================
+-- Step 6: FLATTEN_PS - Extract company address (3rd level)
+-- ============================================
+-- Source: embedded object (1:1) -> ONE_TO_ONE relationship
+-- Note: Use FULL PATH from original source
+
+FLATTEN_PS person.employment.company.address AS company_address
+COPY_PS person.employment.company.address.street TO company_address.street
+COPY_PS person.employment.company.address.city TO company_address.city
+ADD_PS KEY company_address.company_address_id AS String
+ADD_PS REFERENCE company_address.company_id REFERENCES company(company_id) WITH CARDINALITY ONE_TO_ONE
+
+-- ============================================
+-- Step 7: UNWIND_PS - Expand tags array into table
+-- ============================================
+-- Source: array (1:N) -> ONE_TO_MANY relationship
+
+UNWIND_PS person.tags[] INTO person_tag
+RENAME_PS FEATURE value TO tag_value IN person_tag
+ADD_PS KEY person_tag.person_tag_id AS String
+ADD_PS REFERENCE person_tag.person_id REFERENCES person(person_id) WITH CARDINALITY ONE_TO_MANY
+
+-- ============================================
+-- Step 8: UNWIND_PS - Expand knows array into M:N join table
+-- ============================================
+-- Source: array M:N -> Composite PK + TWO FK relationships
+
+UNWIND_PS person.knows[] INTO person_knows
+RENAME_PS FEATURE value TO knows_person_id IN person_knows
+ADD_PS REFERENCE person_knows.person_id REFERENCES person(person_id) WITH CARDINALITY ONE_TO_MANY
+ADD_PS REFERENCE person_knows.knows_person_id REFERENCES person(person_id) WITH CARDINALITY ONE_TO_MANY
+ADD_PS KEY (person_id, knows_person_id) TO person_knows

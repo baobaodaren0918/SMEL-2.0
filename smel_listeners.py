@@ -161,14 +161,29 @@ class BaseSMELListener:
         return result
 
     def _parse_key_columns(self, key_columns_ctx):
-        """Parse key columns - single or composite"""
-        if key_columns_ctx.identifier():
-            # Single column
-            return [key_columns_ctx.identifier().getText()]
+        """
+        Parse key columns - supports qualifiedName (entity.field) or composite keys.
+
+        Returns: (key_columns_list, entity_name)
+        - For qualifiedName: (["field"], "entity") or (["field"], None)
+        - For composite: (["a", "b"], None)
+        """
+        if key_columns_ctx.qualifiedName():
+            # New: qualifiedName supports entity.field syntax
+            full_path = key_columns_ctx.qualifiedName().getText()
+            parts = full_path.split(".")
+            if len(parts) == 2:
+                # Explicit entity.field syntax: address.address_id -> (["address_id"], "address")
+                entity_name = parts[0]
+                field_name = parts[1]
+                return [field_name], entity_name
+            else:
+                # Single identifier (no dot): just field name
+                return [full_path], None
         elif key_columns_ctx.identifierList():
             # Composite key (id1, id2, id3)
-            return [id.getText() for id in key_columns_ctx.identifierList().identifier()]
-        return []
+            return [id.getText() for id in key_columns_ctx.identifierList().identifier()], None
+        return [], None
 
     def _parse_key_clauses(self, clause_list):
         """Parse key clauses"""
@@ -238,9 +253,14 @@ class SMELSpecificListener(SMEL_SpecificListener, BaseSMELListener):
     def enterFlatten(self, ctx):
         self.operations.append(Operation("FLATTEN", {
             "source": ctx.qualifiedName().getText(),
-            "target": ctx.identifier().getText(),
-            "clauses": self._parse_flatten_clauses(ctx.flattenClause())
+            "target": ctx.identifier().getText()
         }, original_keyword="FLATTEN"))
+
+    def enterUnwind(self, ctx):
+        self.operations.append(Operation("UNWIND", {
+            "source": ctx.qualifiedName().getText(),
+            "target": ctx.identifier().getText()
+        }, original_keyword="UNWIND"))
 
     def enterNest(self, ctx):
         self.operations.append(Operation("NEST", {
@@ -282,11 +302,25 @@ class SMELSpecificListener(SMEL_SpecificListener, BaseSMELListener):
         }))
 
     def enterAdd_reference(self, ctx):
+        # New syntax: ADD_REFERENCE entity.field REFERENCES table(column)
+        # Supports explicit entity.field syntax: ADD_REFERENCE address.person_id REFERENCES person(person_id)
+        qualified_name = ctx.qualifiedName().getText()
+        parts = qualified_name.split(".")
+        if len(parts) == 2:
+            entity_name = parts[0]
+            field_name = parts[1]
+        else:
+            entity_name = None
+            field_name = qualified_name
+
+        identifiers = ctx.identifier()
         self.operations.append(Operation("ADD_REFERENCE", {
-            "reference": ctx.qualifiedName().getText(),
-            "target": ctx.identifier().getText(),
+            "entity": entity_name,
+            "field_name": field_name,
+            "target_table": identifiers[0].getText(),
+            "target_column": identifiers[1].getText(),
             "clauses": self._parse_reference_clauses(ctx.referenceClause())
-        }))
+        }, original_keyword="ADD_REFERENCE"))
 
     def enterAdd_embedded(self, ctx):
         self.operations.append(Operation("ADD_EMBEDDED", {
@@ -302,42 +336,56 @@ class SMELSpecificListener(SMEL_SpecificListener, BaseSMELListener):
         }))
 
     def enterAdd_primary_key(self, ctx):
+        # New syntax supports: ADD_PRIMARY_KEY address.address_id AS String
+        data_type = ctx.dataType().getText() if ctx.dataType() else None
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        # Entity priority: explicit TO clause > entity from qualifiedName path
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("ADD_KEY", {
             "key_type": "PRIMARY",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None,
+            "key_columns": key_columns,
+            "data_type": data_type,
+            "entity": entity_name,
             "clauses": self._parse_key_clauses(ctx.keyClause())
-        }))
+        }, original_keyword="ADD_PRIMARY_KEY"))
 
     def enterAdd_foreign_key(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("ADD_KEY", {
             "key_type": "FOREIGN",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None,
+            "key_columns": key_columns,
+            "entity": entity_name,
             "clauses": self._parse_key_clauses(ctx.keyClause())
-        }))
+        }, original_keyword="ADD_FOREIGN_KEY"))
 
     def enterAdd_unique_key(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("ADD_KEY", {
             "key_type": "UNIQUE",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None,
+            "key_columns": key_columns,
+            "entity": entity_name,
             "clauses": self._parse_key_clauses(ctx.keyClause())
         }))
 
     def enterAdd_partition_key(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("ADD_KEY", {
             "key_type": "PARTITION",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None,
+            "key_columns": key_columns,
+            "entity": entity_name,
             "clauses": self._parse_key_clauses(ctx.keyClause())
         }))
 
     def enterAdd_clustering_key(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("ADD_KEY", {
             "key_type": "CLUSTERING",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None,
+            "key_columns": key_columns,
+            "entity": entity_name,
             "clauses": self._parse_key_clauses(ctx.keyClause())
         }))
 
@@ -394,38 +442,48 @@ class SMELSpecificListener(SMEL_SpecificListener, BaseSMELListener):
         }))
 
     def enterDelete_primary_key(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("DELETE_KEY", {
             "key_type": "PRIMARY",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None
+            "key_columns": key_columns,
+            "entity": entity_name
         }))
 
     def enterDelete_foreign_key(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("DELETE_KEY", {
             "key_type": "FOREIGN",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None
+            "key_columns": key_columns,
+            "entity": entity_name
         }))
 
     def enterDelete_unique_key(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("DELETE_KEY", {
             "key_type": "UNIQUE",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None
+            "key_columns": key_columns,
+            "entity": entity_name
         }))
 
     def enterDelete_partition_key(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("DELETE_KEY", {
             "key_type": "PARTITION",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None
+            "key_columns": key_columns,
+            "entity": entity_name
         }))
 
     def enterDelete_clustering_key(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("DELETE_KEY", {
             "key_type": "CLUSTERING",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None
+            "key_columns": key_columns,
+            "entity": entity_name
         }))
 
     def enterDelete_variation(self, ctx):
@@ -462,17 +520,21 @@ class SMELSpecificListener(SMEL_SpecificListener, BaseSMELListener):
         }))
 
     def enterRemove_unique_key(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("REMOVE_KEY", {
             "key_type": "UNIQUE",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None
+            "key_columns": key_columns,
+            "entity": entity_name
         }))
 
     def enterRemove_foreign_key(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("REMOVE_KEY", {
             "key_type": "FOREIGN",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None
+            "key_columns": key_columns,
+            "entity": entity_name
         }))
 
     def enterRemove_label(self, ctx):
@@ -516,7 +578,7 @@ class SMELSpecificListener(SMEL_SpecificListener, BaseSMELListener):
         self.operations.append(Operation("COPY", {
             "source": ctx.qualifiedName(0).getText(),
             "target": ctx.qualifiedName(1).getText()
-        }))
+        }, original_keyword="COPY"))
 
     def enterMove(self, ctx):
         self.operations.append(Operation("MOVE", {
@@ -554,7 +616,7 @@ class SMELSpecificListener(SMEL_SpecificListener, BaseSMELListener):
         self.operations.append(Operation("CAST", {
             "target": ctx.qualifiedName().getText(),
             "type": ctx.dataType().getText()
-        }))
+        }, original_keyword="CAST"))
 
     def enterLinking(self, ctx):
         self.operations.append(Operation("LINKING", {
@@ -591,9 +653,14 @@ class SMELPauschalisiertListener(SMEL_PauschalisiertListener, BaseSMELListener):
     def enterFlatten_ps(self, ctx):
         self.operations.append(Operation("FLATTEN", {
             "source": ctx.qualifiedName().getText(),
-            "target": ctx.identifier().getText(),
-            "clauses": self._parse_flatten_clauses(ctx.flattenClause())
+            "target": ctx.identifier().getText()
         }, original_keyword="FLATTEN_PS"))
+
+    def enterUnwind_ps(self, ctx):
+        self.operations.append(Operation("UNWIND", {
+            "source": ctx.qualifiedName().getText(),
+            "target": ctx.identifier().getText()
+        }, original_keyword="UNWIND_PS"))
 
     def enterNest_ps(self, ctx):
         self.operations.append(Operation("NEST", {
@@ -635,11 +702,25 @@ class SMELPauschalisiertListener(SMEL_PauschalisiertListener, BaseSMELListener):
         }))
 
     def enterReferenceAdd(self, ctx):
+        # New syntax: REFERENCE entity.field REFERENCES table(column)
+        # Supports explicit entity.field syntax: ADD_PS REFERENCE address.person_id REFERENCES person(person_id)
+        qualified_name = ctx.qualifiedName().getText()
+        parts = qualified_name.split(".")
+        if len(parts) == 2:
+            entity_name = parts[0]
+            field_name = parts[1]
+        else:
+            entity_name = None
+            field_name = qualified_name
+
+        identifiers = ctx.identifier()
         self.operations.append(Operation("ADD_REFERENCE", {
-            "reference": ctx.qualifiedName().getText(),
-            "target": ctx.identifier().getText(),
+            "entity": entity_name,
+            "field_name": field_name,
+            "target_table": identifiers[0].getText(),
+            "target_column": identifiers[1].getText(),
             "clauses": self._parse_reference_clauses(ctx.referenceClause())
-        }))
+        }, original_keyword="ADD_PS REFERENCE"))
 
     def enterEmbeddedAdd(self, ctx):
         self.operations.append(Operation("ADD_EMBEDDED", {
@@ -655,12 +736,22 @@ class SMELPauschalisiertListener(SMEL_PauschalisiertListener, BaseSMELListener):
         }))
 
     def enterKeyAdd(self, ctx):
+        # New syntax: keyType? KEY qualifiedName (AS dataType)? (TO identifier)?
+        # Supports explicit entity.field syntax: ADD_PS KEY address.address_id AS String
+        key_type = ctx.keyType().getText() if ctx.keyType() else "PRIMARY"  # Default to PRIMARY
+        data_type = ctx.dataType().getText() if ctx.dataType() else None
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        # Entity priority: explicit TO clause > entity from qualifiedName path
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
+        # Build original keyword: ADD_PS [keyType] KEY
+        original_kw = "ADD_PS " + (key_type + " " if key_type != "PRIMARY" else "") + "KEY"
         self.operations.append(Operation("ADD_KEY", {
-            "key_type": ctx.keyType().getText(),
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None,
+            "key_type": key_type,
+            "key_columns": key_columns,
+            "data_type": data_type,
+            "entity": entity_name,
             "clauses": self._parse_key_clauses(ctx.keyClause())
-        }))
+        }, original_keyword=original_kw))
 
     def enterVariationAdd(self, ctx):
         self.operations.append(Operation("ADD_VARIATION", {
@@ -715,10 +806,12 @@ class SMELPauschalisiertListener(SMEL_PauschalisiertListener, BaseSMELListener):
         }))
 
     def enterKeyDelete(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("DELETE_KEY", {
             "key_type": ctx.keyType().getText(),
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None
+            "key_columns": key_columns,
+            "entity": entity_name
         }))
 
     def enterVariationDelete(self, ctx):
@@ -755,17 +848,21 @@ class SMELPauschalisiertListener(SMEL_PauschalisiertListener, BaseSMELListener):
         }))
 
     def enterUniqueKeyRemove(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("REMOVE_KEY", {
             "key_type": "UNIQUE",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None
+            "key_columns": key_columns,
+            "entity": entity_name
         }))
 
     def enterForeignKeyRemove(self, ctx):
+        key_columns, entity_from_path = self._parse_key_columns(ctx.keyColumns())
+        entity_name = ctx.identifier().getText() if ctx.identifier() else entity_from_path
         self.operations.append(Operation("REMOVE_KEY", {
             "key_type": "FOREIGN",
-            "key_columns": self._parse_key_columns(ctx.keyColumns()),
-            "entity": ctx.identifier().getText() if ctx.identifier() else None
+            "key_columns": key_columns,
+            "entity": entity_name
         }))
 
     def enterLabelRemove(self, ctx):
@@ -809,7 +906,7 @@ class SMELPauschalisiertListener(SMEL_PauschalisiertListener, BaseSMELListener):
         self.operations.append(Operation("COPY", {
             "source": ctx.qualifiedName(0).getText(),
             "target": ctx.qualifiedName(1).getText()
-        }))
+        }, original_keyword="COPY_PS"))
 
     def enterMove_ps(self, ctx):
         self.operations.append(Operation("MOVE", {
@@ -847,7 +944,7 @@ class SMELPauschalisiertListener(SMEL_PauschalisiertListener, BaseSMELListener):
         self.operations.append(Operation("CAST", {
             "target": ctx.qualifiedName().getText(),
             "type": ctx.dataType().getText()
-        }))
+        }, original_keyword="CAST_PS"))
 
     def enterLinking_ps(self, ctx):
         self.operations.append(Operation("LINKING", {

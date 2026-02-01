@@ -289,13 +289,8 @@ class SMEL_SpecificVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SMEL_SpecificParser#flattenClause.
-    def visitFlattenClause(self, ctx:SMEL_SpecificParser.FlattenClauseContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SMEL_SpecificParser#columnRenameClause.
-    def visitColumnRenameClause(self, ctx:SMEL_SpecificParser.ColumnRenameClauseContext):
+    # Visit a parse tree produced by SMEL_SpecificParser#unwind.
+    def visitUnwind(self, ctx:SMEL_SpecificParser.UnwindContext):
         return self.visitChildren(ctx)
 
 
@@ -324,13 +319,18 @@ class SMEL_SpecificVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SMEL_SpecificParser#extractClause.
-    def visitExtractClause(self, ctx:SMEL_SpecificParser.ExtractClauseContext):
+    # Visit a parse tree produced by SMEL_SpecificParser#copy.
+    def visitCopy(self, ctx:SMEL_SpecificParser.CopyContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SMEL_SpecificParser#copy.
-    def visitCopy(self, ctx:SMEL_SpecificParser.CopyContext):
+    # Visit a parse tree produced by SMEL_SpecificParser#copy_key.
+    def visitCopy_key(self, ctx:SMEL_SpecificParser.Copy_keyContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by SMEL_SpecificParser#copyKeyClause.
+    def visitCopyKeyClause(self, ctx:SMEL_SpecificParser.CopyKeyClauseContext):
         return self.visitChildren(ctx)
 
 
@@ -376,16 +376,6 @@ class SMEL_SpecificVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SMEL_SpecificParser#whereClause.
     def visitWhereClause(self, ctx:SMEL_SpecificParser.WhereClauseContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SMEL_SpecificParser#addReferenceClause.
-    def visitAddReferenceClause(self, ctx:SMEL_SpecificParser.AddReferenceClauseContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SMEL_SpecificParser#generateKeyClause.
-    def visitGenerateKeyClause(self, ctx:SMEL_SpecificParser.GenerateKeyClauseContext):
         return self.visitChildren(ctx)
 
 

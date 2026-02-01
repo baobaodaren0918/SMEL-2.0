@@ -77,6 +77,7 @@ class SchemaTransformer:
         self.database = copy.deepcopy(database)
         self.changes: List[str] = []
         self.key_registry: Dict[str, Dict[str, Any]] = {}
+        self._last_created_entity: Optional[str] = None  # Track last created entity for ADD_KEY/ADD_REFERENCE
         self._init_source_keys()
 
     def _init_source_keys(self) -> None:
@@ -215,12 +216,13 @@ class SchemaTransformer:
         new_entity = EntityType(object_name=[target_name])
 
         # Determine PK type based on clauses
-        # - Has GENERATE KEY -> Single PK
-        # - No GENERATE KEY -> Composite PK from all FKs (M:N join table)
+        # - Has GENERATE KEY -> Single PK with generated key
+        # - No GENERATE KEY + has ref_clauses -> Composite PK from all FKs (M:N join table)
+        # - No GENERATE KEY + no ref_clauses -> No PK yet (will be added by separate ADD_KEY operation)
         has_generate_key = generate_key_clause is not None
 
         if has_generate_key:
-            # Single PK mode
+            # Single PK mode with GENERATE KEY clause (legacy syntax)
             pk_name = generate_key_clause["key_name"]
             pk_mode = generate_key_clause["mode"]
 
@@ -252,20 +254,7 @@ class SchemaTransformer:
                 "source_entity": parts[0]  # Parent entity name
             }
 
-            # Add data columns based on source type
-            if is_primitive_array:
-                # Primitive array -> add 'value' column (can be renamed via RENAME value TO xxx)
-                value_col_name = rename_clauses.get("value", "value")
-                new_entity.add_attribute(Attribute(value_col_name, primitive_element_type, False, False))
-            elif embedded_entity:
-                # Embedded object/object array -> copy all attributes (can be renamed via RENAME)
-                for attr in embedded_entity.attributes:
-                    if attr.attr_name != pk_name:
-                        # Apply rename if specified
-                        new_attr_name = rename_clauses.get(attr.attr_name, attr.attr_name)
-                        new_entity.add_attribute(Attribute(new_attr_name, attr.data_type, False, attr.is_optional))
-
-            # Add FK references (not part of PK)
+            # Add FK references (not part of PK) - legacy syntax with inline clauses
             for c in ref_clauses:
                 target_entity = self.database.get_entity_type(c["target"])
                 fk_type = PrimitiveDataType(PrimitiveType.INTEGER)
@@ -280,8 +269,8 @@ class SchemaTransformer:
                                                       cardinality=Cardinality.ONE_TO_ONE, is_optional=False))
                 self.changes.append(f"ADD_REF:{target_name}.{c['ref_name']}")
 
-        else:
-            # Composite PK mode (M:N join table) - all FKs become PK
+        elif ref_clauses:
+            # Composite PK mode (M:N join table) - all FKs become PK (legacy syntax)
             fk_attrs = []
             for c in ref_clauses:
                 target_entity = self.database.get_entity_type(c["target"])
@@ -317,17 +306,58 @@ class SchemaTransformer:
 
         # Add new entity to database
         self.database.add_entity_type(new_entity)
+        self._last_created_entity = target_name  # Track for subsequent ADD_KEY/ADD_REFERENCE
         self.changes.append(f"FLATTEN:{target_name}")
 
-        # Cleanup: remove source from parent
-        if is_primitive_array:
-            # Remove the array attribute from parent
-            parent_entity.remove_attribute(embedded_name)
-        elif embedded_entity:
-            # Remove the embedded relationship and entity
-            parent_entity.remove_relationship(embedded_name)
-            if target_name != full_embedded_path:
-                self.database.remove_entity_type(full_embedded_path)
+        # Note: In the new syntax (separate COPY operations), we do NOT remove the source here.
+        # The source entity/attributes are needed for subsequent COPY operations.
+        # Cleanup will happen automatically during export (embedded entities without relationships are ignored).
+
+    def _handle_unwind(self, params: Dict) -> None:
+        """
+        UNWIND_PS: Expand array field into separate table.
+
+        Example: UNWIND_PS person.tags[] INTO person_tag
+
+        This creates a new table for the array elements. The subsequent
+        ADD_PS KEY and ADD_PS REFERENCE operations define the structure.
+        """
+        source_path = params["source"]
+        target_name = params["target"]
+
+        # Parse source path: person.tags[] -> parent=person, array_name=tags
+        parts = source_path.replace("[]", "").split(".")
+        if len(parts) < 2:
+            return
+
+        array_name = parts[-1]
+        parent_path = ".".join(parts[:-1])
+
+        parent_entity = self.database.get_entity_type(parent_path)
+        if not parent_entity:
+            return
+
+        # Check if source is an array attribute
+        attr = parent_entity.get_attribute(array_name)
+        primitive_element_type = None
+        if attr and hasattr(attr.data_type, 'element_type'):
+            primitive_element_type = attr.data_type.element_type
+
+        # Create new entity for array elements
+        new_entity = EntityType(object_name=[target_name])
+
+        # If it's a primitive array, add 'value' column
+        if primitive_element_type:
+            new_entity.add_attribute(Attribute("value", primitive_element_type, False, False))
+
+        # Add new entity to database
+        self.database.add_entity_type(new_entity)
+        self._last_created_entity = target_name  # Track for subsequent ADD_KEY/ADD_REFERENCE
+        self.changes.append(f"UNWIND:{target_name}")
+
+        # Remove the array attribute from parent
+        if attr:
+            parent_entity.remove_attribute(array_name)
 
     def _handle_delete_reference(self, params: Dict) -> None:
         parts = params["reference"].split(".")
@@ -350,16 +380,65 @@ class SchemaTransformer:
             self.changes.append(f"DELETE_EMBEDDED:{parent_name}.{embedded_name}")
 
     def _handle_add_reference(self, params: Dict) -> None:
-        parts = params["reference"].split(".")
-        if len(parts) != 2:
+        """ADD_PS REFERENCE entity.field REFERENCES target_table(target_column) WITH CARDINALITY"""
+        # New explicit syntax: entity, field_name, target_table, target_column
+        field_name = params.get("field_name")
+        target_table = params.get("target_table")
+        target_column = params.get("target_column")
+        entity_name = params.get("entity")
+
+        # Fallback to old syntax: reference (entity.field), target
+        if not field_name and "reference" in params:
+            parts = params["reference"].split(".")
+            if len(parts) != 2:
+                return
+            entity_name = parts[0]
+            field_name = parts[1]
+            target_table = params.get("target")
+            target_column = None
+        elif not entity_name:
+            # Use last created entity if no entity specified
+            entity_name = self._last_created_entity
+
+        if not entity_name or not field_name or not target_table:
             return
-        entity = self.database.get_entity_type(parts[0])
-        if entity:
-            if not entity.get_attribute(parts[1]):
-                entity.add_attribute(Attribute(parts[1], PrimitiveDataType(PrimitiveType.INTEGER), False, True))
-            entity.add_relationship(Reference(ref_name=parts[1], refs_to=params["target"],
-                                              cardinality=Cardinality.ONE_TO_ONE, is_optional=True))
-            self.changes.append(f"ADD_REF:{parts[0]}.{parts[1]}")
+
+        entity = self.database.get_entity_type(entity_name)
+        if not entity:
+            return
+
+        # Get target entity's primary key type for FK attribute
+        target_entity = self.database.get_entity_type(target_table)
+        fk_type = PrimitiveDataType(PrimitiveType.INTEGER)
+        if target_entity:
+            target_pk = target_entity.get_primary_key()
+            if target_pk and target_pk.unique_properties:
+                pk_attr = target_entity.get_attribute_by_id(target_pk.unique_properties[0].property_id)
+                if pk_attr:
+                    fk_type = pk_attr.data_type
+
+        if not entity.get_attribute(field_name):
+            entity.add_attribute(Attribute(field_name, fk_type, False, True))
+
+        # Parse cardinality from clauses
+        # clauses can be a dict (from _parse_reference_clauses) or a list
+        cardinality = Cardinality.ONE_TO_ONE  # Default
+        clauses = params.get("clauses", {})
+        if isinstance(clauses, dict):
+            # Dict format: {'cardinality': 'ONE_TO_MANY', ...}
+            if 'cardinality' in clauses:
+                cardinality = self.CARDINALITY_MAP.get(clauses['cardinality'], Cardinality.ONE_TO_ONE)
+        else:
+            # List format: [{'type': 'CARDINALITY', 'value': 'ONE_TO_MANY'}, ...]
+            for clause in clauses:
+                if isinstance(clause, dict) and clause.get("type") == "CARDINALITY":
+                    cardinality = self.CARDINALITY_MAP.get(clause.get("value"), Cardinality.ONE_TO_ONE)
+                elif isinstance(clause, str) and clause in self.CARDINALITY_MAP:
+                    cardinality = self.CARDINALITY_MAP.get(clause, Cardinality.ONE_TO_ONE)
+
+        entity.add_relationship(Reference(ref_name=field_name, refs_to=target_table,
+                                          cardinality=cardinality, is_optional=True))
+        self.changes.append(f"ADD_REF:{entity_name}.{field_name}")
 
     def _handle_add_attribute(self, params: Dict) -> None:
         """ADD ATTRIBUTE email TO Customer WITH TYPE String NOT NULL"""
@@ -532,24 +611,52 @@ class SchemaTransformer:
         self.changes.append(f"ADD_LABEL:{entity_name}.{label}")
 
     def _handle_add_key(self, params: Dict) -> None:
-        """ADD PRIMARY KEY id TO Customer OR ADD PRIMARY KEY (id1, id2) TO Customer"""
+        """ADD_PS KEY id AS String OR ADD_PS PRIMARY KEY (id1, id2) TO Customer"""
         entity_name = params.get("entity")
         key_columns = params.get("key_columns", [])  # List of column names
-        key_type_str = self.KEY_TYPE_MAP.get(params["key_type"], "primary")
+        key_type_str = self.KEY_TYPE_MAP.get(params.get("key_type", "PRIMARY"), "primary")
+        data_type_str = params.get("data_type")  # New: AS dataType syntax
+
+        # Parse data type if specified
+        if data_type_str:
+            type_map = {
+                "STRING": PrimitiveType.STRING, "TEXT": PrimitiveType.TEXT,
+                "INT": PrimitiveType.INTEGER, "INTEGER": PrimitiveType.INTEGER,
+                "LONG": PrimitiveType.LONG, "DOUBLE": PrimitiveType.DOUBLE,
+                "FLOAT": PrimitiveType.FLOAT, "DECIMAL": PrimitiveType.DECIMAL,
+                "BOOLEAN": PrimitiveType.BOOLEAN, "DATE": PrimitiveType.DATE,
+                "TIMESTAMP": PrimitiveType.TIMESTAMP,
+                "UUID": PrimitiveType.UUID, "BINARY": PrimitiveType.BINARY
+            }
+            key_data_type = PrimitiveDataType(type_map.get(data_type_str.upper(), PrimitiveType.STRING))
+        else:
+            key_data_type = PrimitiveDataType(PrimitiveType.INTEGER)
+
+        # If no entity specified, use the last created entity from key_registry
+        if not entity_name and self._last_created_entity:
+            entity_name = self._last_created_entity
 
         entity = self.database.get_entity_type(entity_name) if entity_name else None
-        if not entity or not key_columns:
+        if not key_columns:
             return
+
+        # If entity doesn't exist yet, create a minimal one or defer
+        if not entity:
+            # Create entity with just the key
+            entity = EntityType(object_name=[entity_name] if entity_name else ["unnamed"])
+            self.database.add_entity_type(entity)
 
         # Get or create attributes for all key columns
         key_attrs = []
         for col_name in key_columns:
             attr = entity.get_attribute(col_name)
             if not attr:
-                attr = Attribute(col_name, PrimitiveDataType(PrimitiveType.INTEGER), True, False)
+                attr = Attribute(col_name, key_data_type, True, False)
                 entity.add_attribute(attr)
             else:
                 attr.is_key = True
+                if data_type_str:
+                    attr.data_type = key_data_type
             key_attrs.append(attr)
 
         # Determine PKTypeEnum for partition/clustering keys
@@ -823,21 +930,34 @@ class SchemaTransformer:
             self.changes.append(f"RENAME_ENTITY:{old_name}->{new_name}")
 
     def _handle_copy(self, params: Dict) -> None:
-        """COPY: Copy attribute or entity from source to target."""
+        """
+        COPY: Copy attribute from source to target.
+
+        Supports nested paths for embedded objects:
+        - COPY person.address.street TO address.street
+          Source: entity="person.address", attr="street"
+          Target: entity="address", attr="street"
+        """
         source_path = params["source"]
         target_path = params["target"]
 
         source_parts = source_path.split(".")
         target_parts = target_path.split(".")
 
-        if len(source_parts) == 2 and len(target_parts) == 2:
-            # Copy attribute: Entity.attr -> Entity.attr
-            src_entity = self.database.get_entity_type(source_parts[0])
-            tgt_entity = self.database.get_entity_type(target_parts[0])
+        if len(source_parts) >= 2 and len(target_parts) >= 2:
+            # Copy attribute: last part is attribute name, rest is entity path
+            src_entity_path = ".".join(source_parts[:-1])
+            src_attr_name = source_parts[-1]
+            tgt_entity_path = ".".join(target_parts[:-1])
+            tgt_attr_name = target_parts[-1]
+
+            src_entity = self.database.get_entity_type(src_entity_path)
+            tgt_entity = self.database.get_entity_type(tgt_entity_path)
+
             if src_entity and tgt_entity:
-                src_attr = src_entity.get_attribute(source_parts[1])
+                src_attr = src_entity.get_attribute(src_attr_name)
                 if src_attr:
-                    new_attr = Attribute(target_parts[1], src_attr.data_type, False, src_attr.is_optional)
+                    new_attr = Attribute(tgt_attr_name, src_attr.data_type, False, src_attr.is_optional)
                     tgt_entity.add_attribute(new_attr)
                     self.changes.append(f"COPY:{source_path}->{target_path}")
         elif len(source_parts) == 1 and len(target_parts) == 1:
@@ -1244,7 +1364,8 @@ def db_to_dict(db: Database) -> Dict[str, Any]:
             "references": [
                 {
                     "name": r.ref_name,
-                    "target": r.get_target_entity_name()
+                    "target": r.get_target_entity_name(),
+                    "cardinality": r.cardinality.value if hasattr(r, 'cardinality') else '1..1'
                 }
                 for r in entity.relationships if isinstance(r, Reference)
             ],
@@ -1577,6 +1698,49 @@ def sort_by_dependency(operations: List, initial_entities: set) -> List:
     return sorted_flatten + other_ops
 
 
+def _cleanup_flattened_entities(db: Database, changes: List[str]) -> None:
+    """
+    Clean up embedded entities that have been flattened to standalone tables.
+
+    After FLATTEN operations, the original embedded entities (e.g., person.address)
+    and their embedded relationships should be removed from the result schema.
+    This ensures the ER diagram shows only the new normalized structure.
+    """
+    # Collect names of flattened targets
+    flattened_targets = set()
+    for change in changes:
+        if change.startswith("FLATTEN:") or change.startswith("UNWIND:"):
+            target = change.split(":")[1]
+            flattened_targets.add(target)
+
+    if not flattened_targets:
+        return
+
+    # Find embedded entities to remove (entities with "." in name are embedded paths)
+    entities_to_remove = []
+    for entity_name in list(db.entity_types.keys()):
+        if "." in entity_name:
+            # This is an embedded entity path like "person.address"
+            # Check if a flattened table was created for this path's last component
+            short_name = entity_name.split(".")[-1]
+            # Also check if any flattened target matches this entity
+            entities_to_remove.append(entity_name)
+
+    for entity_name in entities_to_remove:
+        db.remove_entity_type(entity_name)
+
+    # Remove embedded relationships from all remaining entities
+    # (they've been converted to reference relationships)
+    for entity in db.entity_types.values():
+        embedded_to_remove = []
+        for rel in entity.relationships:
+            if isinstance(rel, Embedded):
+                embedded_to_remove.append(rel.aggr_name)
+
+        for rel_name in embedded_to_remove:
+            entity.remove_relationship(rel_name)
+
+
 def run_migration(direction: str) -> Dict[str, Any]:
     """
     Run a complete migration and return results.
@@ -1627,14 +1791,10 @@ def run_migration(direction: str) -> Dict[str, Any]:
     success_count = 0
     skipped_count = 0
 
-    # Sort operations by dependency order
-    initial_entities = set(source_db.entity_types.keys())
-    try:
-        sorted_operations = sort_by_dependency(operations, initial_entities)
-    except ValueError as e:
-        return {"error": f"Dependency error: {e}"}
-
-    for i, op in enumerate(sorted_operations):
+    # Use original operation order from SMEL file
+    # For new syntax (ADD_PS KEY, ADD_PS REFERENCE after FLATTEN/UNWIND),
+    # the order in the file is intentional and should be preserved
+    for i, op in enumerate(operations):
         prev_count = len(transformer.database.entity_types)
         prev_snapshot = db_to_dict(transformer.database)
         prev_changes_len = len(transformer.changes)
@@ -1672,6 +1832,10 @@ def run_migration(direction: str) -> Dict[str, Any]:
 
     result_db = transformer.database
     result_db.db_type = DatabaseType.DOCUMENT if target_type == "Document" else DatabaseType.RELATIONAL
+
+    # Cleanup: Remove embedded entities and relationships that have been flattened
+    # This ensures the ER diagram shows only the normalized structure
+    _cleanup_flattened_entities(result_db, transformer.changes)
 
     # Step 3: Export Meta V2 -> Target DDL
     if target_adapter == MongoDBAdapter:

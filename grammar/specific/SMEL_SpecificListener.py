@@ -512,21 +512,12 @@ class SMEL_SpecificListener(ParseTreeListener):
         pass
 
 
-    # Enter a parse tree produced by SMEL_SpecificParser#flattenClause.
-    def enterFlattenClause(self, ctx:SMEL_SpecificParser.FlattenClauseContext):
+    # Enter a parse tree produced by SMEL_SpecificParser#unwind.
+    def enterUnwind(self, ctx:SMEL_SpecificParser.UnwindContext):
         pass
 
-    # Exit a parse tree produced by SMEL_SpecificParser#flattenClause.
-    def exitFlattenClause(self, ctx:SMEL_SpecificParser.FlattenClauseContext):
-        pass
-
-
-    # Enter a parse tree produced by SMEL_SpecificParser#columnRenameClause.
-    def enterColumnRenameClause(self, ctx:SMEL_SpecificParser.ColumnRenameClauseContext):
-        pass
-
-    # Exit a parse tree produced by SMEL_SpecificParser#columnRenameClause.
-    def exitColumnRenameClause(self, ctx:SMEL_SpecificParser.ColumnRenameClauseContext):
+    # Exit a parse tree produced by SMEL_SpecificParser#unwind.
+    def exitUnwind(self, ctx:SMEL_SpecificParser.UnwindContext):
         pass
 
 
@@ -575,21 +566,30 @@ class SMEL_SpecificListener(ParseTreeListener):
         pass
 
 
-    # Enter a parse tree produced by SMEL_SpecificParser#extractClause.
-    def enterExtractClause(self, ctx:SMEL_SpecificParser.ExtractClauseContext):
-        pass
-
-    # Exit a parse tree produced by SMEL_SpecificParser#extractClause.
-    def exitExtractClause(self, ctx:SMEL_SpecificParser.ExtractClauseContext):
-        pass
-
-
     # Enter a parse tree produced by SMEL_SpecificParser#copy.
     def enterCopy(self, ctx:SMEL_SpecificParser.CopyContext):
         pass
 
     # Exit a parse tree produced by SMEL_SpecificParser#copy.
     def exitCopy(self, ctx:SMEL_SpecificParser.CopyContext):
+        pass
+
+
+    # Enter a parse tree produced by SMEL_SpecificParser#copy_key.
+    def enterCopy_key(self, ctx:SMEL_SpecificParser.Copy_keyContext):
+        pass
+
+    # Exit a parse tree produced by SMEL_SpecificParser#copy_key.
+    def exitCopy_key(self, ctx:SMEL_SpecificParser.Copy_keyContext):
+        pass
+
+
+    # Enter a parse tree produced by SMEL_SpecificParser#copyKeyClause.
+    def enterCopyKeyClause(self, ctx:SMEL_SpecificParser.CopyKeyClauseContext):
+        pass
+
+    # Exit a parse tree produced by SMEL_SpecificParser#copyKeyClause.
+    def exitCopyKeyClause(self, ctx:SMEL_SpecificParser.CopyKeyClauseContext):
         pass
 
 
@@ -671,24 +671,6 @@ class SMEL_SpecificListener(ParseTreeListener):
 
     # Exit a parse tree produced by SMEL_SpecificParser#whereClause.
     def exitWhereClause(self, ctx:SMEL_SpecificParser.WhereClauseContext):
-        pass
-
-
-    # Enter a parse tree produced by SMEL_SpecificParser#addReferenceClause.
-    def enterAddReferenceClause(self, ctx:SMEL_SpecificParser.AddReferenceClauseContext):
-        pass
-
-    # Exit a parse tree produced by SMEL_SpecificParser#addReferenceClause.
-    def exitAddReferenceClause(self, ctx:SMEL_SpecificParser.AddReferenceClauseContext):
-        pass
-
-
-    # Enter a parse tree produced by SMEL_SpecificParser#generateKeyClause.
-    def enterGenerateKeyClause(self, ctx:SMEL_SpecificParser.GenerateKeyClauseContext):
-        pass
-
-    # Exit a parse tree produced by SMEL_SpecificParser#generateKeyClause.
-    def exitGenerateKeyClause(self, ctx:SMEL_SpecificParser.GenerateKeyClauseContext):
         pass
 
 

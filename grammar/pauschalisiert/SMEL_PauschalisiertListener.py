@@ -548,21 +548,12 @@ class SMEL_PauschalisiertListener(ParseTreeListener):
         pass
 
 
-    # Enter a parse tree produced by SMEL_PauschalisiertParser#flattenClause.
-    def enterFlattenClause(self, ctx:SMEL_PauschalisiertParser.FlattenClauseContext):
+    # Enter a parse tree produced by SMEL_PauschalisiertParser#unwind_ps.
+    def enterUnwind_ps(self, ctx:SMEL_PauschalisiertParser.Unwind_psContext):
         pass
 
-    # Exit a parse tree produced by SMEL_PauschalisiertParser#flattenClause.
-    def exitFlattenClause(self, ctx:SMEL_PauschalisiertParser.FlattenClauseContext):
-        pass
-
-
-    # Enter a parse tree produced by SMEL_PauschalisiertParser#columnRenameClause.
-    def enterColumnRenameClause(self, ctx:SMEL_PauschalisiertParser.ColumnRenameClauseContext):
-        pass
-
-    # Exit a parse tree produced by SMEL_PauschalisiertParser#columnRenameClause.
-    def exitColumnRenameClause(self, ctx:SMEL_PauschalisiertParser.ColumnRenameClauseContext):
+    # Exit a parse tree produced by SMEL_PauschalisiertParser#unwind_ps.
+    def exitUnwind_ps(self, ctx:SMEL_PauschalisiertParser.Unwind_psContext):
         pass
 
 
@@ -611,21 +602,30 @@ class SMEL_PauschalisiertListener(ParseTreeListener):
         pass
 
 
-    # Enter a parse tree produced by SMEL_PauschalisiertParser#extractClause.
-    def enterExtractClause(self, ctx:SMEL_PauschalisiertParser.ExtractClauseContext):
-        pass
-
-    # Exit a parse tree produced by SMEL_PauschalisiertParser#extractClause.
-    def exitExtractClause(self, ctx:SMEL_PauschalisiertParser.ExtractClauseContext):
-        pass
-
-
     # Enter a parse tree produced by SMEL_PauschalisiertParser#copy_ps.
     def enterCopy_ps(self, ctx:SMEL_PauschalisiertParser.Copy_psContext):
         pass
 
     # Exit a parse tree produced by SMEL_PauschalisiertParser#copy_ps.
     def exitCopy_ps(self, ctx:SMEL_PauschalisiertParser.Copy_psContext):
+        pass
+
+
+    # Enter a parse tree produced by SMEL_PauschalisiertParser#copy_key_ps.
+    def enterCopy_key_ps(self, ctx:SMEL_PauschalisiertParser.Copy_key_psContext):
+        pass
+
+    # Exit a parse tree produced by SMEL_PauschalisiertParser#copy_key_ps.
+    def exitCopy_key_ps(self, ctx:SMEL_PauschalisiertParser.Copy_key_psContext):
+        pass
+
+
+    # Enter a parse tree produced by SMEL_PauschalisiertParser#copyKeyClause.
+    def enterCopyKeyClause(self, ctx:SMEL_PauschalisiertParser.CopyKeyClauseContext):
+        pass
+
+    # Exit a parse tree produced by SMEL_PauschalisiertParser#copyKeyClause.
+    def exitCopyKeyClause(self, ctx:SMEL_PauschalisiertParser.CopyKeyClauseContext):
         pass
 
 
@@ -707,24 +707,6 @@ class SMEL_PauschalisiertListener(ParseTreeListener):
 
     # Exit a parse tree produced by SMEL_PauschalisiertParser#whereClause.
     def exitWhereClause(self, ctx:SMEL_PauschalisiertParser.WhereClauseContext):
-        pass
-
-
-    # Enter a parse tree produced by SMEL_PauschalisiertParser#addReferenceClause.
-    def enterAddReferenceClause(self, ctx:SMEL_PauschalisiertParser.AddReferenceClauseContext):
-        pass
-
-    # Exit a parse tree produced by SMEL_PauschalisiertParser#addReferenceClause.
-    def exitAddReferenceClause(self, ctx:SMEL_PauschalisiertParser.AddReferenceClauseContext):
-        pass
-
-
-    # Enter a parse tree produced by SMEL_PauschalisiertParser#generateKeyClause.
-    def enterGenerateKeyClause(self, ctx:SMEL_PauschalisiertParser.GenerateKeyClauseContext):
-        pass
-
-    # Exit a parse tree produced by SMEL_PauschalisiertParser#generateKeyClause.
-    def exitGenerateKeyClause(self, ctx:SMEL_PauschalisiertParser.GenerateKeyClauseContext):
         pass
 
 

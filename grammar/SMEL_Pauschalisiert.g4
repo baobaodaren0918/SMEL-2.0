@@ -78,8 +78,11 @@ withTypeClause: WITH TYPE dataType;
 withDefaultClause: WITH DEFAULT literal;
 notNullClause: NOT_NULL;
 
-// Add reference: ADD_PS REFERENCE customer_id TO Order WITH CARDINALITY ONE_TO_MANY
-referenceAdd: REFERENCE qualifiedName TO identifier referenceClause*;
+// Add reference: ADD_PS REFERENCE entity.field REFERENCES target_table(target_column)
+// SQL-style foreign key reference syntax with explicit entity.field
+// Example: ADD_PS REFERENCE address.person_id REFERENCES person(person_id)
+// Example: ADD_PS REFERENCE order.customer_id REFERENCES customer(id) WITH CARDINALITY ONE_TO_MANY
+referenceAdd: REFERENCE qualifiedName REFERENCES identifier LPAREN identifier RPAREN referenceClause*;
 referenceClause: withCardinalityClause | usingKeyClause | whereClause;
 
 // Add embedded: ADD_PS EMBEDDED address TO Customer WITH CARDINALITY ONE_TO_ONE
@@ -92,13 +95,17 @@ entityAdd: ENTITY identifier entityClause*;
 entityClause: withAttributesClause | withKeyClause;
 withKeyClause: WITH KEY identifier;
 
-// Add key: ADD_PS PRIMARY KEY id TO Customer OR ADD_PS PRIMARY KEY (id1, id2) TO Customer
-// Example: ADD_PS PRIMARY KEY id TO Customer WITH TYPE UUID
-keyAdd: keyType KEY keyColumns (TO identifier)? keyClause*;
-// Note: WITH TYPE clause is primarily for PRIMARY KEY (auto-generated keys like UUID, SERIAL)
+// Add key: ADD_PS KEY entity.field AS String (explicit entity.field syntax)
+// Or full form: ADD_PS PRIMARY KEY id TO Customer WITH TYPE UUID (legacy TO syntax)
+// Example: ADD_PS KEY address.address_id AS String  (new explicit syntax)
+// Example: ADD_PS PRIMARY KEY (id1, id2) TO Customer (composite key)
+keyAdd: keyType? KEY keyColumns (AS dataType)? (TO identifier)? keyClause*;
+// Note: keyType is optional, defaults to PRIMARY KEY when omitted
+// Note: AS dataType is a simplified alternative to WITH TYPE dataType
+// Note: keyColumns now supports qualifiedName (entity.field) for explicit entity specification
 
-// Key columns - single identifier or parenthesized list for composite keys
-keyColumns: identifier | LPAREN identifierList RPAREN;
+// Key columns - qualifiedName (entity.field) or parenthesized list for composite keys
+keyColumns: qualifiedName | LPAREN identifierList RPAREN;
 
 // Add variation: ADD_PS VARIATION v1 TO Customer WITH ATTRIBUTES (a, b)
 variationAdd: VARIATION identifier TO identifier variationClause*;
@@ -367,7 +374,7 @@ INDEX: 'INDEX'; LABEL: 'LABEL';
 // Key types
 PRIMARY: 'PRIMARY'; UNIQUE: 'UNIQUE'; FOREIGN: 'FOREIGN';
 PARTITION: 'PARTITION'; CLUSTERING: 'CLUSTERING';
-REFERENCES: 'REFERENCES'; COLUMNS: 'COLUMNS';
+REFERENCE: 'REFERENCE'; REFERENCES: 'REFERENCES'; COLUMNS: 'COLUMNS';
 
 // Variation and RelType clauses
 PROPERTIES: 'PROPERTIES'; STRUCTURE: 'STRUCTURE';
