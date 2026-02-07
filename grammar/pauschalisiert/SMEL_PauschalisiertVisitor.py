@@ -309,6 +309,11 @@ class SMEL_PauschalisiertVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by SMEL_PauschalisiertParser#unnest_ps.
+    def visitUnnest_ps(self, ctx:SMEL_PauschalisiertParser.Unnest_psContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by SMEL_PauschalisiertParser#unwind_ps.
     def visitUnwind_ps(self, ctx:SMEL_PauschalisiertParser.Unwind_psContext):
         return self.visitChildren(ctx)
@@ -321,16 +326,6 @@ class SMEL_PauschalisiertVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SMEL_PauschalisiertParser#nestClause.
     def visitNestClause(self, ctx:SMEL_PauschalisiertParser.NestClauseContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SMEL_PauschalisiertParser#unnest_ps.
-    def visitUnnest_ps(self, ctx:SMEL_PauschalisiertParser.Unnest_psContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SMEL_PauschalisiertParser#unnestClause.
-    def visitUnnestClause(self, ctx:SMEL_PauschalisiertParser.UnnestClauseContext):
         return self.visitChildren(ctx)
 
 

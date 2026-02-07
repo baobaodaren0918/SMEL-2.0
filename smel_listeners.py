@@ -251,16 +251,32 @@ class SMELSpecificListener(SMEL_SpecificListener, BaseSMELListener):
 
     # Structure operations
     def enterFlatten(self, ctx):
+        # New syntax: FLATTEN qualifiedName
+        # Flattens nested object fields into parent table (reduce depth by 1)
+        # Example: FLATTEN person.name
+        #   Before: person { name: { vorname, nachname }, age }
+        #   After:  person { name_vorname, name_nachname, age }
         self.operations.append(Operation("FLATTEN", {
-            "source": ctx.qualifiedName().getText(),
-            "target": ctx.identifier().getText()
+            "source": ctx.qualifiedName().getText()
         }, original_keyword="FLATTEN"))
 
     def enterUnwind(self, ctx):
-        self.operations.append(Operation("UNWIND", {
-            "source": ctx.qualifiedName().getText(),
-            "target": ctx.identifier().getText()
-        }, original_keyword="UNWIND"))
+        source = ctx.qualifiedName().getText()
+        target = ctx.identifier().getText() if ctx.identifier() else None
+
+        if target:
+            # Mode 1: Create new table - UNWIND person.tags[] INTO person_tag
+            self.operations.append(Operation("UNWIND", {
+                "mode": "create_table",
+                "source": source,
+                "target": target
+            }, original_keyword="UNWIND"))
+        else:
+            # Mode 2: Expand in place - UNWIND person_tag.value
+            self.operations.append(Operation("UNWIND", {
+                "mode": "expand_in_place",
+                "source": source
+            }, original_keyword="UNWIND"))
 
     def enterNest(self, ctx):
         self.operations.append(Operation("NEST", {
@@ -271,18 +287,23 @@ class SMELSpecificListener(SMEL_SpecificListener, BaseSMELListener):
         }))
 
     def enterUnnest(self, ctx):
-        clauses = {}
-        for clause in ctx.unnestClause():
-            if clause.AS():
-                clauses['alias'] = clause.identifier().getText()
-            elif clause.usingKeyClause():
-                clauses['key'] = clause.usingKeyClause().identifier().getText()
+        # New syntax: UNNEST qualifiedName COLON identifierList AS identifier WITH qualifiedName
+        # Extracts nested object to separate table (normalization)
+        # Example: UNNEST person.address:street,city AS address WITH person.person_id
+        #   Before: person { person_id, address: { street, city } }
+        #   After:  person { person_id }
+        #          address { person_id, street, city }
+        source_path = ctx.qualifiedName(0).getText()  # person.address
+        fields = [id.getText() for id in ctx.identifierList().identifier()]  # street, city
+        target_name = ctx.identifier().getText()  # address
+        parent_key = ctx.qualifiedName(1).getText()  # person.person_id
 
         self.operations.append(Operation("UNNEST", {
-            "source": ctx.identifier(0).getText(),
-            "parent": ctx.identifier(1).getText(),
-            "clauses": clauses
-        }))
+            "source_path": source_path,
+            "fields": fields,
+            "target": target_name,
+            "parent_key": parent_key
+        }, original_keyword="UNNEST"))
 
     def enterExtract(self, ctx):
         attrs = [id.getText() for id in ctx.identifierList().identifier()]
@@ -595,7 +616,13 @@ class SMELSpecificListener(SMEL_SpecificListener, BaseSMELListener):
         }))
 
     def enterSplit(self, ctx):
-        # Parse splitPart contexts
+        # New syntax: SPLIT identifier INTO splitPart (COMMA splitPart)+
+        # Vertical partitioning - divides one entity into multiple separate entities
+        # Example: SPLIT person INTO person(person_id, vorname, nachname, age), person_tag(person_id, tags)
+        #   Before: person { person_id, vorname, nachname, age, tags[] }
+        #   After:  person { person_id, vorname, nachname, age }
+        #          person_tag { person_id, tags[] }
+        source_entity = ctx.identifier().getText()
         split_parts = ctx.splitPart() if isinstance(ctx.splitPart(), list) else [ctx.splitPart()]
 
         parts = []
@@ -608,9 +635,9 @@ class SMELSpecificListener(SMEL_SpecificListener, BaseSMELListener):
             })
 
         self.operations.append(Operation("SPLIT", {
-            "source": ctx.identifier().getText(),
+            "source": source_entity,
             "parts": parts
-        }))
+        }, original_keyword="SPLIT"))
 
     def enterCast(self, ctx):
         self.operations.append(Operation("CAST", {
@@ -651,16 +678,32 @@ class SMELPauschalisiertListener(SMEL_PauschalisiertListener, BaseSMELListener):
 
     # Structure operations
     def enterFlatten_ps(self, ctx):
+        # New syntax: FLATTEN_PS qualifiedName
+        # Flattens nested object fields into parent table (reduce depth by 1)
+        # Example: FLATTEN_PS person.name
+        #   Before: person { name: { vorname, nachname }, age }
+        #   After:  person { name_vorname, name_nachname, age }
         self.operations.append(Operation("FLATTEN", {
-            "source": ctx.qualifiedName().getText(),
-            "target": ctx.identifier().getText()
+            "source": ctx.qualifiedName().getText()
         }, original_keyword="FLATTEN_PS"))
 
     def enterUnwind_ps(self, ctx):
-        self.operations.append(Operation("UNWIND", {
-            "source": ctx.qualifiedName().getText(),
-            "target": ctx.identifier().getText()
-        }, original_keyword="UNWIND_PS"))
+        source = ctx.qualifiedName().getText()
+        target = ctx.identifier().getText() if ctx.identifier() else None
+
+        if target:
+            # Mode 1: Create new table - UNWIND_PS person.tags[] INTO person_tag
+            self.operations.append(Operation("UNWIND", {
+                "mode": "create_table",
+                "source": source,
+                "target": target
+            }, original_keyword="UNWIND_PS"))
+        else:
+            # Mode 2: Expand in place - UNWIND_PS person_tag.value
+            self.operations.append(Operation("UNWIND", {
+                "mode": "expand_in_place",
+                "source": source
+            }, original_keyword="UNWIND_PS"))
 
     def enterNest_ps(self, ctx):
         self.operations.append(Operation("NEST", {
@@ -671,18 +714,23 @@ class SMELPauschalisiertListener(SMEL_PauschalisiertListener, BaseSMELListener):
         }, original_keyword="NEST_PS"))
 
     def enterUnnest_ps(self, ctx):
-        clauses = {}
-        for clause in ctx.unnestClause():
-            if clause.AS():
-                clauses['alias'] = clause.identifier().getText()
-            elif clause.usingKeyClause():
-                clauses['key'] = clause.usingKeyClause().identifier().getText()
+        # New syntax: UNNEST_PS qualifiedName COLON identifierList AS identifier WITH qualifiedName
+        # Extracts nested object to separate table (normalization)
+        # Example: UNNEST_PS person.address:street,city AS address WITH person.person_id
+        #   Before: person { person_id, address: { street, city } }
+        #   After:  person { person_id }
+        #          address { person_id, street, city }
+        source_path = ctx.qualifiedName(0).getText()  # person.address
+        fields = [id.getText() for id in ctx.identifierList().identifier()]  # street, city
+        target_name = ctx.identifier().getText()  # address
+        parent_key = ctx.qualifiedName(1).getText()  # person.person_id
 
         self.operations.append(Operation("UNNEST", {
-            "source": ctx.identifier(0).getText(),
-            "parent": ctx.identifier(1).getText(),
-            "clauses": clauses
-        }))
+            "source_path": source_path,
+            "fields": fields,
+            "target": target_name,
+            "parent_key": parent_key
+        }, original_keyword="UNNEST_PS"))
 
     def enterExtract_ps(self, ctx):
         attrs = [id.getText() for id in ctx.identifierList().identifier()]
@@ -923,7 +971,13 @@ class SMELPauschalisiertListener(SMEL_PauschalisiertListener, BaseSMELListener):
         }))
 
     def enterSplit_ps(self, ctx):
-        # Parse splitPartPs contexts
+        # New syntax: SPLIT_PS identifier INTO splitPartPs (COMMA splitPartPs)+
+        # Vertical partitioning - divides one entity into multiple separate entities
+        # Example: SPLIT_PS person INTO person(person_id, vorname, nachname, age), person_tag(person_id, tags)
+        #   Before: person { person_id, vorname, nachname, age, tags[] }
+        #   After:  person { person_id, vorname, nachname, age }
+        #          person_tag { person_id, tags[] }
+        source_entity = ctx.identifier().getText()
         split_parts = ctx.splitPartPs() if isinstance(ctx.splitPartPs(), list) else [ctx.splitPartPs()]
 
         parts = []
@@ -936,9 +990,9 @@ class SMELPauschalisiertListener(SMEL_PauschalisiertListener, BaseSMELListener):
             })
 
         self.operations.append(Operation("SPLIT", {
-            "source": ctx.identifier().getText(),
+            "source": source_entity,
             "parts": parts
-        }))
+        }, original_keyword="SPLIT_PS"))
 
     def enterCast_ps(self, ctx):
         self.operations.append(Operation("CAST", {

@@ -142,188 +142,269 @@ class SchemaTransformer:
 
     def _handle_flatten(self, params: Dict) -> None:
         """
-        Unified FLATTEN operation - handles three scenarios:
-        1. Embedded Object: person.address -> copies all attributes
-        2. Primitive Array: person.tags[] -> adds 'value' column
-        3. Reference Array (M:N): person.knows[] (no GENERATE KEY) -> composite PK from FKs
+        FLATTEN: Flatten nested object fields into parent table (reduce depth by 1).
 
-        Auto-detection logic:
-        - Has []? -> Array type
-        - Has GENERATE KEY? -> Single PK, otherwise Composite PK (all FKs)
-        - Source is ListDataType? -> Add 'value' column
-        - Source is EntityType? -> Copy all attributes
+        Reference: André Conrad - "Die Operation FLATTEN erstellt aus dem Objekt in der Spalte
+                   jeweils eine Spalte für jedes Attribut dieses Objekts"
+
+        Example: FLATTEN_PS person.name
+          Before: person { name: { vorname, nachname }, age }
+          After:  person { name_vorname, name_nachname, age }
+
+        The nested object's fields are flattened with a prefix (nested_fieldname).
         """
         source_path = params["source"]
-        target_name = params["target"]
 
-        # Check if source is an array (has [])
-        is_array = "[]" in source_path
-
-        # Support deep nested paths (from André Conrad): person.address.location -> ["person", "address", "location"]
-        parts = source_path.replace("[]", "").split(".")
+        # Parse path: person.name -> parent=person, nested=name
+        parts = source_path.split(".")
         if len(parts) < 2:
             return
 
-        # Last part is the embedded/array name, rest is the parent path
-        embedded_name = parts[-1]
+        nested_name = parts[-1]
         parent_path = ".".join(parts[:-1])
-        full_embedded_path = ".".join(parts)
 
         parent_entity = self.database.get_entity_type(parent_path)
         if not parent_entity:
             return
 
-        # Try to resolve embedded entity through parent's relationships first
-        # This handles consecutive nested FLATTENs like: employment.company
-        # where "employment" is already flattened but "company" is still under "person.employment.company"
+        # Try to find the embedded entity
         embedded_entity = None
+        full_embedded_path = source_path
+
+        # Check parent's relationships for the embedded
         for rel in parent_entity.get_embedded():
-            if rel.aggr_name == embedded_name:
-                # Found the relationship - use its aggregates path to get the actual entity
+            if rel.aggr_name == nested_name:
                 embedded_entity = self.database.get_entity_type(rel.aggregates)
                 if embedded_entity:
-                    full_embedded_path = rel.aggregates  # Update to actual full path
+                    full_embedded_path = rel.aggregates
                 break
 
-        # Fallback: try direct path lookup (for backward compatibility)
+        # Fallback: try direct path lookup
         if not embedded_entity:
             embedded_entity = self.database.get_entity_type(full_embedded_path)
 
-        # Check if this is a primitive array (ListDataType attribute)
-        is_primitive_array = False
-        primitive_element_type = None
         if not embedded_entity:
-            attr = parent_entity.get_attribute(embedded_name)
-            if attr and hasattr(attr.data_type, 'element_type'):
-                is_primitive_array = True
-                primitive_element_type = attr.data_type.element_type
-            elif not is_array:
-                return  # Not an array and no embedded entity found
+            return
 
-        # Parse clauses
-        generate_key_clause = None
-        ref_clauses = []
-        rename_clauses = {}  # old_name -> new_name mapping
-        for c in params.get("clauses", []):
-            if c["type"] == "GENERATE_KEY":
-                generate_key_clause = c
-            elif c["type"] == "ADD_REFERENCE":
-                ref_clauses.append(c)
-            elif c["type"] == "RENAME":
-                rename_clauses[c["old_name"]] = c["new_name"]
+        # Flatten: copy all attributes from embedded entity to parent with prefix
+        prefix = nested_name + "_"
+        for attr in embedded_entity.attributes:
+            new_attr_name = prefix + attr.attr_name
+            if not parent_entity.get_attribute(new_attr_name):
+                parent_entity.add_attribute(Attribute(
+                    new_attr_name, attr.data_type, attr.is_key, attr.is_optional
+                ))
+
+        # Remove the embedded relationship from parent
+        for rel in list(parent_entity.relationships):
+            if isinstance(rel, Embedded) and rel.aggr_name == nested_name:
+                parent_entity.remove_relationship(rel.aggr_name)
+                break
+
+        # Remove the nested entity (optional, as it's now integrated into parent)
+        self.database.remove_entity_type(full_embedded_path)
+
+        self.changes.append(f"FLATTEN:{source_path}")
+
+    def _handle_unnest(self, params: Dict) -> None:
+        """
+        UNNEST: Extract nested object to separate table (normalization).
+
+        This is the reverse of NEST - extracts embedded document to new table.
+        Inner nested objects are preserved and transferred to the new table.
+
+        Example: UNNEST_PS person.employment:position AS employment WITH person.person_id
+          Before: person { person_id, employment: { position, company: { name } } }
+          After:  person { person_id }
+                  employment { person_id, position, company: { name } }  <- company preserved!
+
+        Parameters:
+        - source_path: person.employment (the nested path to extract)
+        - fields: [position] (fields to include in new table)
+        - target: employment (the new table name)
+        - parent_key: person.person_id (the parent's key to copy as FK)
+        """
+        source_path = params.get("source_path")
+        fields = params.get("fields", [])
+        target_name = params.get("target")
+        parent_key = params.get("parent_key")
+
+        if not source_path or not target_name or not parent_key:
+            return
+
+        # Parse source path: person.employment -> parent=person, nested=employment
+        path_parts = source_path.split(".")
+        if len(path_parts) < 2:
+            return
+
+        nested_name = path_parts[-1]
+        parent_path = ".".join(path_parts[:-1])
+
+        # Parse parent key: person.person_id -> key=person_id
+        parent_key_parts = parent_key.split(".")
+        if len(parent_key_parts) < 2:
+            return
+        parent_key_name = parent_key_parts[-1]
+
+        # Get parent entity
+        parent_entity = self.database.get_entity_type(parent_path)
+        if not parent_entity:
+            return
+
+        # Get the parent's key attribute (for FK type)
+        parent_key_attr = parent_entity.get_attribute(parent_key_name)
+        fk_type = parent_key_attr.data_type if parent_key_attr else PrimitiveDataType(PrimitiveType.STRING)
+
+        # Try to find the embedded entity
+        embedded_entity = None
+        full_embedded_path = source_path
+        embedded_rel = None
+
+        # Check parent's relationships for the embedded
+        for rel in parent_entity.get_embedded():
+            if rel.aggr_name == nested_name:
+                embedded_entity = self.database.get_entity_type(rel.aggregates)
+                embedded_rel = rel
+                if embedded_entity:
+                    full_embedded_path = rel.aggregates
+                break
+
+        # Fallback: try direct path lookup
+        if not embedded_entity:
+            embedded_entity = self.database.get_entity_type(full_embedded_path)
 
         # Create new entity
         new_entity = EntityType(object_name=[target_name])
 
-        # Determine PK type based on clauses
-        # - Has GENERATE KEY -> Single PK with generated key
-        # - No GENERATE KEY + has ref_clauses -> Composite PK from all FKs (M:N join table)
-        # - No GENERATE KEY + no ref_clauses -> No PK yet (will be added by separate ADD_KEY operation)
-        has_generate_key = generate_key_clause is not None
+        # Add parent's key as FK
+        fk_attr = Attribute(parent_key_name, fk_type, False, False)
+        new_entity.add_attribute(fk_attr)
 
-        if has_generate_key:
-            # Single PK mode with GENERATE KEY clause (legacy syntax)
-            pk_name = generate_key_clause["key_name"]
-            pk_mode = generate_key_clause["mode"]
-
-            # Get prefix: use specified or auto-generate
-            prefix = generate_key_clause.get("prefix") or self._auto_prefix(target_name)
-
-            if pk_mode == "STRING":
-                pk_type = PrimitiveDataType(PrimitiveType.STRING, max_length=255)
-            elif pk_mode == "FROM" and generate_key_clause.get("from_field") and embedded_entity:
-                src_attr = embedded_entity.get_attribute(generate_key_clause["from_field"])
-                pk_type = src_attr.data_type if src_attr else PrimitiveDataType(PrimitiveType.INTEGER)
-            else:  # SERIAL
-                pk_type = PrimitiveDataType(PrimitiveType.INTEGER)
-
-            pk_attr = Attribute(pk_name, pk_type, True, False)
-            new_entity.add_attribute(pk_attr)
-            new_entity.add_constraint(UniqueConstraint(
-                is_primary_key=True,
-                is_managed=True,
-                unique_properties=[UniqueProperty(primary_key_type=PKTypeEnum.SIMPLE, property_id=pk_attr.meta_id)]
-            ))
-
-            # Register generated key to key_registry
-            self.key_registry[target_name] = {
-                "key_field": pk_name,
-                "key_type": pk_type.primitive_type.value if hasattr(pk_type, 'primitive_type') else "string",
-                "prefix": prefix,
-                "generated": True,
-                "source_entity": parts[0]  # Parent entity name
-            }
-
-            # Add FK references (not part of PK) - legacy syntax with inline clauses
-            for c in ref_clauses:
-                target_entity = self.database.get_entity_type(c["target"])
-                fk_type = PrimitiveDataType(PrimitiveType.INTEGER)
-                if target_entity:
-                    target_pk = target_entity.get_primary_key()
-                    if target_pk and target_pk.unique_properties:
-                        pk_attr_target = target_entity.get_attribute_by_id(target_pk.unique_properties[0].property_id)
-                        if pk_attr_target:
-                            fk_type = pk_attr_target.data_type
-                new_entity.add_attribute(Attribute(c["ref_name"], fk_type, False, False))
-                new_entity.add_relationship(Reference(ref_name=c["ref_name"], refs_to=c["target"],
-                                                      cardinality=Cardinality.ONE_TO_ONE, is_optional=False))
-                self.changes.append(f"ADD_REF:{target_name}.{c['ref_name']}")
-
-        elif ref_clauses:
-            # Composite PK mode (M:N join table) - all FKs become PK (legacy syntax)
-            fk_attrs = []
-            for c in ref_clauses:
-                target_entity = self.database.get_entity_type(c["target"])
-                fk_type = PrimitiveDataType(PrimitiveType.STRING, max_length=255)
-                if target_entity:
-                    target_pk = target_entity.get_primary_key()
-                    if target_pk and target_pk.unique_properties:
-                        pk_attr_target = target_entity.get_attribute_by_id(target_pk.unique_properties[0].property_id)
-                        if pk_attr_target:
-                            fk_type = pk_attr_target.data_type
-
-                fk_attr = Attribute(c["ref_name"], fk_type, True, False)  # is_key=True for composite PK
-                new_entity.add_attribute(fk_attr)
-                fk_attrs.append(fk_attr)
-                new_entity.add_relationship(Reference(ref_name=c["ref_name"], refs_to=c["target"],
-                                                      cardinality=Cardinality.ONE_TO_ONE, is_optional=False))
-                self.changes.append(f"ADD_REF:{target_name}.{c['ref_name']}")
-
-            # Create composite primary key from all FK columns
-            if fk_attrs:
-                unique_props = [UniqueProperty(primary_key_type=PKTypeEnum.SIMPLE, property_id=attr.meta_id)
-                               for attr in fk_attrs]
-                new_entity.add_constraint(UniqueConstraint(
-                    is_primary_key=True,
-                    is_managed=True,
-                    unique_properties=unique_props
-                ))
-
-        # Copy relationships from embedded entity if exists
+        # Collect embedded relationship names to avoid adding them as attributes
+        embedded_names = set()
         if embedded_entity:
             for rel in embedded_entity.relationships:
-                new_entity.add_relationship(copy.deepcopy(rel))
+                if isinstance(rel, Embedded):
+                    embedded_names.add(rel.aggr_name)
+
+        # Add specified fields from embedded entity (skip embedded objects - they're transferred separately)
+        for field_name in fields:
+            # Skip if this is an embedded relationship (will be transferred below)
+            if field_name in embedded_names:
+                continue
+
+            if embedded_entity:
+                attr = embedded_entity.get_attribute(field_name)
+                if attr:
+                    new_entity.add_attribute(Attribute(
+                        attr.attr_name, attr.data_type, False, attr.is_optional
+                    ))
+                else:
+                    # Field not found and not embedded, add as string
+                    new_entity.add_attribute(Attribute(
+                        field_name, PrimitiveDataType(PrimitiveType.STRING), False, True
+                    ))
+            else:
+                new_entity.add_attribute(Attribute(
+                    field_name, PrimitiveDataType(PrimitiveType.STRING), False, True
+                ))
+
+        # IMPORTANT: Transfer inner embedded relationships and recursively update all nested paths
+        # e.g., when extracting person.employment -> employment:
+        #   person.employment.company -> employment.company
+        #   person.employment.company.address -> employment.company.address
+        if embedded_entity:
+            old_prefix = full_embedded_path  # e.g., "person.employment"
+            new_prefix = target_name          # e.g., "employment"
+
+            # First, collect all entities that need path updates (to avoid modifying dict during iteration)
+            entities_to_update = []
+            for entity_name in list(self.database.entity_types.keys()):
+                if entity_name.startswith(old_prefix + "."):
+                    entities_to_update.append(entity_name)
+
+            # Update all nested entity paths recursively
+            for old_entity_path in entities_to_update:
+                # person.employment.company -> employment.company
+                # person.employment.company.address -> employment.company.address
+                new_entity_path = new_prefix + old_entity_path[len(old_prefix):]
+
+                nested_entity = self.database.get_entity_type(old_entity_path)
+                if nested_entity:
+                    self.database.remove_entity_type(old_entity_path)
+                    nested_entity.object_name = new_entity_path.split(".")
+                    self.database.add_entity_type(nested_entity)
+
+                    # Also update embedded relationships within this entity to point to new paths
+                    for rel in nested_entity.relationships:
+                        if isinstance(rel, Embedded):
+                            if rel.aggregates.startswith(old_prefix + "."):
+                                rel.aggregates = new_prefix + rel.aggregates[len(old_prefix):]
+
+            # Transfer direct inner embedded relationships to the new entity
+            for inner_rel in list(embedded_entity.relationships):
+                if isinstance(inner_rel, Embedded):
+                    # Calculate new path for this relationship
+                    new_aggregates_path = new_prefix + inner_rel.aggregates[len(old_prefix):]
+
+                    new_rel = Embedded(
+                        aggr_name=inner_rel.aggr_name,
+                        aggregates=new_aggregates_path,
+                        cardinality=inner_rel.cardinality,
+                        is_optional=inner_rel.is_optional
+                    )
+                    new_entity.add_relationship(new_rel)
 
         # Add new entity to database
         self.database.add_entity_type(new_entity)
-        self._last_created_entity = target_name  # Track for subsequent ADD_KEY/ADD_REFERENCE
-        self.changes.append(f"FLATTEN:{target_name}")
+        self._last_created_entity = target_name
 
-        # Note: In the new syntax (separate COPY operations), we do NOT remove the source here.
-        # The source entity/attributes are needed for subsequent COPY operations.
-        # Cleanup will happen automatically during export (embedded entities without relationships are ignored).
+        # Remove the embedded relationship from parent
+        if embedded_rel:
+            parent_entity.remove_relationship(embedded_rel.aggr_name)
+
+        # Remove the original embedded entity (but inner entities are already transferred)
+        if embedded_entity:
+            self.database.remove_entity_type(full_embedded_path)
+
+        self.changes.append(f"UNNEST:{source_path}->{target_name}")
 
     def _handle_unwind(self, params: Dict) -> None:
         """
-        UNWIND_PS: Expand array field into separate table.
+        UNWIND: Expand array field.
 
-        Example: UNWIND_PS person.tags[] INTO person_tag
+        Supports two modes:
+        1. Create new table: UNWIND_PS person.tags[] INTO person_tag
+           Creates a new table for the array elements.
+        2. Expand in place: UNWIND_PS person_tag.value
+           Expands the array within an existing table (per reference definition).
 
-        This creates a new table for the array elements. The subsequent
-        ADD_PS KEY and ADD_PS REFERENCE operations define the structure.
+        The subsequent ADD_PS KEY and ADD_PS REFERENCE operations define the structure.
         """
-        source_path = params["source"]
-        target_name = params["target"]
+        mode = params.get("mode", "create_table")
+        source_path = params.get("source", "")
+
+        if mode == "expand_in_place":
+            # Mode 2: Expand in place - UNWIND person_tag.tags
+            # Transform array attribute to its element type (for schema transformation)
+            # e.g., tags: ListDataType(STRING) -> tags: STRING
+            parts = source_path.split(".")
+            if len(parts) >= 2:
+                entity_name = parts[0]
+                attr_name = parts[-1]
+                entity = self.database.get_entity_type(entity_name)
+                if entity:
+                    attr = entity.get_attribute(attr_name)
+                    if attr and hasattr(attr.data_type, 'element_type'):
+                        # Convert ListDataType to its element type
+                        attr.data_type = attr.data_type.element_type
+                        self.changes.append(f"UNWIND_INPLACE:{entity_name}.{attr_name}")
+            return
+
+        # Mode 1: Create new table
+        target_name = params.get("target")
+        if not target_name:
+            return
 
         # Parse source path: person.tags[] -> parent=person, array_name=tags
         parts = source_path.replace("[]", "").split(".")
@@ -836,62 +917,6 @@ class SchemaTransformer:
         # Label removal: Remove from entity metadata (non-destructive)
         self.changes.append(f"REMOVE_LABEL:{entity_name}.{label}")
 
-    def _handle_unnest(self, params: Dict) -> None:
-        """UNNEST: Extract embedded object back to standalone entity."""
-        embedded_name = params["embedded"]
-        parent_name = params["parent"]
-
-        parent_entity = self.database.get_entity_type(parent_name)
-        if not parent_entity:
-            return
-
-        # Find the embedded relationship
-        embedded_rel = None
-        for rel in parent_entity.relationships:
-            if isinstance(rel, Embedded) and rel.aggr_name == embedded_name:
-                embedded_rel = rel
-                break
-
-        if not embedded_rel:
-            return
-
-        # Get alias from clauses if provided
-        alias = embedded_name
-        for c in params.get("clauses", []):
-            if c["type"] == "AS":
-                alias = c["alias"]
-
-        # Get the embedded entity
-        embedded_entity = self.database.get_entity_type(embedded_rel.get_target_entity_name())
-        if not embedded_entity:
-            return
-
-        # Create new standalone entity
-        new_entity = EntityType(object_name=[alias])
-        for attr in embedded_entity.attributes:
-            new_entity.add_attribute(Attribute(attr.attr_name, attr.data_type, attr.is_key, attr.is_optional))
-        for constraint in embedded_entity.constraints:
-            new_entity.add_constraint(copy.deepcopy(constraint))
-
-        self.database.add_entity_type(new_entity)
-
-        # Remove embedded relationship from parent
-        parent_entity.remove_relationship(embedded_name)
-
-        # Add reference from parent to new entity
-        pk = new_entity.get_primary_key()
-        fk_type = PrimitiveDataType(PrimitiveType.INTEGER)
-        if pk and pk.unique_properties:
-            pk_attr = new_entity.get_attribute_by_id(pk.unique_properties[0].property_id)
-            if pk_attr:
-                fk_type = pk_attr.data_type
-        fk_name = f"{alias}_id"
-        parent_entity.add_attribute(Attribute(fk_name, fk_type, False, True))
-        parent_entity.add_relationship(Reference(ref_name=fk_name, refs_to=alias,
-                                                  cardinality=Cardinality.ONE_TO_ONE, is_optional=True))
-
-        self.changes.append(f"UNNEST:{parent_name}.{embedded_name}")
-
     def _handle_rename(self, params: Dict) -> None:
         """RENAME: Rename an attribute (feature) within an entity."""
         old_name = params["old_name"]
@@ -1033,14 +1058,22 @@ class SchemaTransformer:
 
     def _handle_split(self, params: Dict) -> None:
         """
-        SPLIT: Split one entity into multiple parts (vertical partitioning).
+        SPLIT: Divide one entity into multiple separate entities (vertical partitioning).
 
-        New syntax supports explicit field grouping:
-        SPLIT User INTO Person (name, age), Account (email, password)
+        Reference: André Conrad - "SPLIT Person into Person:id, firstname, lastname AND knows:id, knows"
 
-        Each part reuses the parent entity's primary key.
+        Example: SPLIT_PS person INTO person(person_id, vorname, nachname, age), person_tag(person_id, tags)
+          Before: person { person_id, vorname, nachname, age, tags[] }
+          After:  person { person_id, vorname, nachname, age }
+                 person_tag { person_id, tags[] }
+
+        Note: Fields can be duplicated across parts (e.g., person_id in both parts for FK relationship).
         """
-        source_name = params["source"]
+        self._handle_split_flat(params)
+
+    def _handle_split_flat(self, params: Dict) -> None:
+        """Handle flat split (vertical partitioning)."""
+        source_name = params.get("source")
         parts = params.get("parts", [])
 
         # Fallback to old syntax if no parts specified
@@ -1700,18 +1733,27 @@ def sort_by_dependency(operations: List, initial_entities: set) -> List:
 
 def _cleanup_flattened_entities(db: Database, changes: List[str]) -> None:
     """
-    Clean up embedded entities that have been flattened to standalone tables.
+    Clean up embedded entities that have been flattened/split to standalone tables.
 
-    After FLATTEN operations, the original embedded entities (e.g., person.address)
+    After FLATTEN/SPLIT operations, the original embedded entities (e.g., person.address)
     and their embedded relationships should be removed from the result schema.
     This ensures the ER diagram shows only the new normalized structure.
     """
-    # Collect names of flattened targets
+    # Collect names of flattened/split targets
     flattened_targets = set()
     for change in changes:
-        if change.startswith("FLATTEN:") or change.startswith("UNWIND:"):
-            target = change.split(":")[1]
-            flattened_targets.add(target)
+        if change.startswith("FLATTEN:") or change.startswith("UNWIND:") or change.startswith("SPLIT:"):
+            # Handle both formats: "SPLIT:source->target" and "FLATTEN:target"
+            parts = change.split(":")
+            if len(parts) >= 2:
+                target_part = parts[1]
+                if "->" in target_part:
+                    # Format: source->target or source->target1,target2
+                    targets = target_part.split("->")[1]
+                    for t in targets.split(","):
+                        flattened_targets.add(t.strip())
+                else:
+                    flattened_targets.add(target_part)
 
     if not flattened_targets:
         return

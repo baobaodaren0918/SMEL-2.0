@@ -1,8 +1,12 @@
 -- SMEL Mini-Example: MongoDB -> PostgreSQL (Specific Operations Version)
 -- Person Document (multi-level nested objects + arrays) -> Normalized Tables
 -- Direction: Denormalized (Embedded) -> Normalized (3NF)
--- Tests: Multiple operation types (FLATTEN, COPY, UNWIND, CAST, RENAME)
--- Syntax: SMEL_Specific.g4 with explicit entity.field syntax
+--
+-- Operation Semantics (per André Conrad reference):
+--   FLATTEN: Flatten nested object fields into same table (reduce depth by 1)
+--   UNNEST:  Extract nested object to separate table (normalization)
+--   SPLIT:   Vertical partitioning of same-level fields
+--   UNWIND:  Expand array into multiple rows in same table
 
 MIGRATION person_mongo_to_pg:1.0
 FROM DOCUMENT TO RELATIONAL
@@ -13,111 +17,126 @@ USING person_schema:1
 -- ============================================
 -- {
 --   _id: "p001",
---   name: "Zhang San",
---   age: "28",                              -- Note: stored as string in MongoDB
---   address: {                              -- Embedded object (1:1)
---     street: "Hauptstrasse 10",
---     city: "Berlin"
---   },
---   employment: {                           -- Embedded object (1:1)
+--   name: { vorname: "Lu", nachname: "Li" },
+--   age: "28",
+--   address: { street: "Hauptstrasse 10", city: "Berlin" },
+--   employment: {
 --     position: "Software Engineer",
---     company: {                            -- Embedded object (1:1)
+--     company: {
 --       name: "Tech Corp",
---       address: {                          -- Embedded object (1:1)
---         street: "Business Str 5",
---         city: "Munich"
---       }
+--       address: { street: "Business Str 5", city: "Munich" }
 --     }
 --   },
---   tags: ["student", "developer"],         -- Array (1:N)
---   knows: ["p002", "p003"]                 -- Array M:N relationship
+--   tags: ["student", "developer"],
+--   knows: ["p002", "p003"]
 -- }
 
 -- ============================================
--- Target: PostgreSQL 3NF Tables
+-- Target: PostgreSQL 3NF Tables (7 tables, 3-level nesting)
 -- ============================================
--- person (person_id, name, age)                    -- age: INTEGER
--- address (address_id, street, city, person_id)
--- employment (employment_id, position, person_id)
--- company (company_id, name, employment_id)
--- company_address (company_address_id, street, city, company_id)
--- person_tag (person_tag_id, tag_value, person_id)
+-- person (person_id, vorname, nachname, age)
+-- address (address_id, person_id, street, city)           ← Level 1
+-- employment (employment_id, person_id, position)         ← Level 1
+-- company (company_id, employment_id, name)               ← Level 2
+-- company_address (company_address_id, company_id, street, city)  ← Level 3
+-- person_tag (person_tag_id, person_id, tag_value)
 -- person_knows (person_id, knows_person_id)
 
 -- ============================================
--- Step 1: RENAME_FEATURE - Rename _id to person_id
+-- Step 0: Rename primary key
 -- ============================================
--- Do this first so all subsequent REFERENCES use person_id
-
 RENAME_FEATURE _id TO person_id IN person
+-- Result:
+-- person: { person_id, name{vorname,nachname}, age, address{street,city},
+--           employment{position,company{name,address{street,city}}}, tags[], knows[] }
 
 -- ============================================
--- Step 2: CAST - Type conversion
+-- Step 1: Extract address table (level 1)
 -- ============================================
-
-CAST person.age TO Integer
-
--- ============================================
--- Step 3: FLATTEN - Extract address (1st level)
--- ============================================
--- Source: embedded object (1:1) -> ONE_TO_ONE relationship
-
-FLATTEN person.address AS address
-COPY person.address.street TO address.street
-COPY person.address.city TO address.city
+UNNEST person.address:street,city AS address WITH person.person_id
 ADD_PRIMARY_KEY address.address_id AS String
 ADD_REFERENCE address.person_id REFERENCES person(person_id) WITH CARDINALITY ONE_TO_ONE
+-- Result:
+-- person: { person_id, name{vorname,nachname}, age,
+--           employment{position,company{name,address{street,city}}}, tags[], knows[] }
+-- address: { address_id, person_id, street, city }
 
 -- ============================================
--- Step 4: FLATTEN - Extract employment (1st level)
+-- Step 2: Extract employment table (level 1)
 -- ============================================
--- Source: embedded object (1:1) -> ONE_TO_ONE relationship
-
-FLATTEN person.employment AS employment
-COPY person.employment.position TO employment.position
+UNNEST person.employment:position AS employment WITH person.person_id
 ADD_PRIMARY_KEY employment.employment_id AS String
 ADD_REFERENCE employment.person_id REFERENCES person(person_id) WITH CARDINALITY ONE_TO_ONE
+-- Result:
+-- person: { person_id, name{vorname,nachname}, age, tags[], knows[] }
+-- address: { address_id, person_id, street, city }
+-- employment: { employment_id, person_id, position, company{name,address{street,city}} }
+--             ↑ company preserved as inner nested object!
 
 -- ============================================
--- Step 5: FLATTEN - Extract company (2nd level)
+-- Step 3: Extract company table (level 2) - from employment table
 -- ============================================
--- Source: embedded object (1:1) -> ONE_TO_ONE relationship
--- Note: Use FULL PATH from original source
-
-FLATTEN person.employment.company AS company
-COPY person.employment.company.name TO company.name
+UNNEST employment.company:name AS company WITH employment.employment_id
 ADD_PRIMARY_KEY company.company_id AS String
 ADD_REFERENCE company.employment_id REFERENCES employment(employment_id) WITH CARDINALITY ONE_TO_ONE
+-- Result:
+-- person: { person_id, name{vorname,nachname}, age, tags[], knows[] }
+-- address: { address_id, person_id, street, city }
+-- employment: { employment_id, person_id, position }
+-- company: { company_id, employment_id, name, address{street,city} }
+--           ↑ address preserved as inner nested object!
 
 -- ============================================
--- Step 6: FLATTEN - Extract company address (3rd level)
+-- Step 4: Extract company_address table (level 3) - 3rd level nesting!
 -- ============================================
--- Source: embedded object (1:1) -> ONE_TO_ONE relationship
--- Note: Use FULL PATH from original source
-
-FLATTEN person.employment.company.address AS company_address
-COPY person.employment.company.address.street TO company_address.street
-COPY person.employment.company.address.city TO company_address.city
+UNNEST company.address:street,city AS company_address WITH company.company_id
 ADD_PRIMARY_KEY company_address.company_address_id AS String
 ADD_REFERENCE company_address.company_id REFERENCES company(company_id) WITH CARDINALITY ONE_TO_ONE
+-- Result:
+-- person: { person_id, name{vorname,nachname}, age, tags[], knows[] }
+-- address: { address_id, person_id, street, city }
+-- employment: { employment_id, person_id, position }
+-- company: { company_id, employment_id, name }
+-- company_address: { company_address_id, company_id, street, city }  ← Level 3!
 
 -- ============================================
--- Step 7: UNWIND - Expand tags array into table
+-- Step 5: Extract person_tag table (array 1:N)
 -- ============================================
--- Source: array (1:N) -> ONE_TO_MANY relationship
-
-UNWIND person.tags[] INTO person_tag
-RENAME_FEATURE value TO tag_value IN person_tag
+SPLIT person INTO person(person_id, name, age, knows), person_tag(person_id, tags)
+UNWIND person_tag.tags
+RENAME_FEATURE tags TO tag_value IN person_tag
 ADD_PRIMARY_KEY person_tag.person_tag_id AS String
 ADD_REFERENCE person_tag.person_id REFERENCES person(person_id) WITH CARDINALITY ONE_TO_MANY
+-- Result:
+-- person: { person_id, name{vorname,nachname}, age, knows[] }
+-- address, employment, company, company_address: (unchanged)
+-- person_tag: { person_tag_id, person_id, tag_value }
 
 -- ============================================
--- Step 8: UNWIND - Expand knows array into M:N join table
+-- Step 6: Extract person_knows table (array M:N)
 -- ============================================
--- Source: array M:N -> Composite PK + TWO FK relationships
-
-UNWIND person.knows[] INTO person_knows
-RENAME_FEATURE value TO knows_person_id IN person_knows
+SPLIT person INTO person(person_id, name, age), person_knows(person_id, knows)
+UNWIND person_knows.knows
+RENAME_FEATURE knows TO knows_person_id IN person_knows
 ADD_REFERENCE person_knows.person_id REFERENCES person(person_id) WITH CARDINALITY ONE_TO_MANY
 ADD_REFERENCE person_knows.knows_person_id REFERENCES person(person_id) WITH CARDINALITY ONE_TO_MANY
 ADD_PRIMARY_KEY (person_id, knows_person_id) TO person_knows
+-- Result:
+-- person: { person_id, name{vorname,nachname}, age }
+-- person_knows: { person_id, knows_person_id }
+
+-- ============================================
+-- Step 7: Finalize person table
+-- ============================================
+FLATTEN person.name
+RENAME_FEATURE name_vorname TO vorname IN person
+RENAME_FEATURE name_nachname TO nachname IN person
+CAST person.age TO Integer
+-- Final Result (7 tables):
+-- person: { person_id, vorname, nachname, age }
+-- address: { address_id, person_id, street, city }
+-- employment: { employment_id, person_id, position }
+-- company: { company_id, employment_id, name }
+-- company_address: { company_address_id, company_id, street, city }
+-- person_tag: { person_tag_id, person_id, tag_value }
+-- person_knows: { person_id, knows_person_id }

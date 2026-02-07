@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from core import run_migration
 
-PORT = 5575
+PORT = 5576
 
 
 class SMELHandler(SimpleHTTPRequestHandler):
@@ -1233,43 +1233,33 @@ def get_html():
                     if (params.entity) html += ' <span class="param-key">in:</span> <span class="param-value">' + params.entity + '</span>';
                     break;
                 case 'FLATTEN':
-                    // Unified FLATTEN: handles embedded objects, value arrays, and M:N reference arrays
-                    html = '<span class="param-value">' + params.source + '</span> → ';
-                    html += '<span class="param-key">AS</span> <span class="param-value">' + params.target + '</span>';
-                    // Indicate PK type based on presence of GENERATE KEY clause
-                    if (params.clauses) {
-                        const hasGenerateKey = params.clauses.some(c => c.type === 'GENERATE_KEY');
-                        if (hasGenerateKey) {
-                            html += ' <span class="param-key">(single PK)</span>';
-                        } else {
-                            html += ' <span class="param-key">(composite PK)</span>';
-                        }
-                        // Show GENERATE KEY details
-                        const genKeyClause = params.clauses.find(c => c.type === 'GENERATE_KEY');
-                        if (genKeyClause) {
-                            const targetName = params.target || '';
-                            const prefix = genKeyClause.prefix || (targetName.length > 3 ? targetName.slice(0,3) + targetName.slice(-1) : targetName);
-                            html += '<div class="clause-detail" style="margin-top:4px;padding-left:12px;font-size:11px;color:#666;">';
-                            html += '├── <span style="color:#34C759;">GENERATE KEY:</span> ' + (genKeyClause.key_name || 'id');
-                            html += ' <span style="color:#888;">(prefix="' + prefix + '", format="' + prefix + '_{uuid6}")</span>';
-                            html += '</div>';
-                        }
-                        // Show ADD REFERENCE details
-                        const refClauses = params.clauses.filter(c => c.type === 'ADD_REFERENCE');
-                        if (refClauses && refClauses.length > 0) {
-                            refClauses.forEach((ref, idx) => {
-                                html += '<div class="clause-detail" style="padding-left:12px;font-size:11px;color:#666;">';
-                                const lineChar = idx === refClauses.length - 1 ? '└──' : '├──';
-                                html += lineChar + ' <span style="color:#007AFF;">ADD REFERENCE:</span> ' + (ref.ref_name || '?') + ' → ' + (ref.target || '?');
-                                html += '</div>';
-                            });
-                        }
+                    // FLATTEN: Flatten nested object fields into parent table (reduce depth by 1)
+                    // New syntax: FLATTEN_PS person.name (no target - flattens to same table with prefix)
+                    html = '<span class="param-key">source:</span> <span class="param-value">' + params.source + '</span>';
+                    html += ' <span style="color:#636366;font-size:12px;">(flatten to same table with prefix)</span>';
+                    break;
+                case 'UNNEST':
+                    // UNNEST: Extract nested object to separate table (normalization)
+                    // New syntax: UNNEST_PS person.address:street,city AS address WITH person.person_id
+                    html = '<span class="param-value">' + params.source_path + '</span>';
+                    if (params.fields && params.fields.length > 0) {
+                        html += ':' + params.fields.join(',');
                     }
+                    html += ' <span class="param-key">AS</span> <span class="param-value">' + params.target + '</span>';
+                    html += ' <span class="param-key">WITH</span> <span class="param-value">' + params.parent_key + '</span>';
                     break;
                 case 'UNWIND':
                     // UNWIND: Expand array into separate table
                     html = '<span class="param-value">' + params.source + '</span> → ';
                     html += '<span class="param-key">INTO</span> <span class="param-value">' + params.target + '</span>';
+                    break;
+                case 'SPLIT':
+                    // SPLIT: Vertical partitioning of same-level fields
+                    // New syntax: SPLIT_PS person INTO person(a, b), person_tag(a, c)
+                    html = '<span class="param-value">' + params.source + '</span> <span class="param-key">INTO</span> ';
+                    if (params.parts && params.parts.length > 0) {
+                        html += params.parts.map(p => '<span class="param-value">' + p.name + '</span>(' + (p.fields || []).join(', ') + ')').join(', ');
+                    }
                     break;
                 case 'ADD_KEY':
                     html = '<span class="param-key">key_type:</span> <span class="param-value">' + (params.key_type || 'PRIMARY') + '</span> ';

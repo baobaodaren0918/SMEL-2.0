@@ -249,25 +249,35 @@ withPropertiesClause: WITH PROPERTIES LPAREN identifierList RPAREN;
 // STRUCTURE OPERATIONS
 // ============================================================================
 
-// FLATTEN_PS - Extract nested object to separate table (non-array)
-// Example: FLATTEN_PS person.address AS address
-// Note: Use separate ADD_PS PRIMARY KEY, ADD_PS FOREIGN KEY operations for constraints
-flatten_ps: FLATTEN_PS qualifiedName AS identifier;
+// FLATTEN_PS - Flatten nested object fields into parent table (reduce depth by 1)
+// Reference: André Conrad - "Die Operation FLATTEN erstellt aus dem Objekt in der Spalte
+//            jeweils eine Spalte für jedes Attribut dieses Objekts"
+// Example: FLATTEN_PS person.name
+//   Before: person { name: { vorname, nachname }, age }
+//   After:  person { name_vorname, name_nachname, age }
+flatten_ps: FLATTEN_PS qualifiedName;
 
-// UNWIND_PS - Expand array field into separate table
-// Example: UNWIND_PS person.tags[] INTO person_tag
-// Note: Use separate ADD_PS PRIMARY KEY, ADD_PS FOREIGN KEY, RENAME_PS FEATURE for constraints
-unwind_ps: UNWIND_PS qualifiedName INTO identifier;
+// UNNEST_PS - Extract nested object to separate table (normalization)
+// This is the reverse of NEST - extracts embedded document to new table
+// Example: UNNEST_PS person.address:street,city AS address WITH person.person_id
+//   Before: person { person_id, address: { street, city } }
+//   After:  person { person_id }
+//          address { person_id, street, city }
+// Note: Use separate ADD_PS KEY, ADD_PS REFERENCE for constraints
+unnest_ps: UNNEST_PS qualifiedName COLON identifierList AS identifier WITH qualifiedName;
+
+// UNWIND_PS - Expand array field into multiple rows
+// Reference: André Conrad - array expansion operation
+// Supports two modes:
+//   1. Expand in place: UNWIND_PS person_tag.tags (expands array within existing table)
+//   2. Create new table: UNWIND_PS person.tags[] INTO person_tag (legacy, creates new table)
+// Note: Use separate ADD_PS KEY, ADD_PS REFERENCE, RENAME_PS FEATURE for constraints
+unwind_ps: UNWIND_PS qualifiedName (INTO identifier)?;
 
 // NEST_PS - Merge separate table into embedded document (PostgreSQL -> MongoDB)
 // Example: NEST_PS address INTO person AS address WITH CARDINALITY ONE_TO_ONE
 nest_ps: NEST_PS identifier INTO identifier AS identifier nestClause*;
 nestClause: withCardinalityClause | usingKeyClause | whereClause;
-
-// UNNEST_PS - Extract embedded document to separate table (MongoDB -> PostgreSQL)
-// Example: UNNEST_PS address FROM person
-unnest_ps: UNNEST_PS identifier FROM identifier unnestClause*;
-unnestClause: AS identifier | usingKeyClause;
 
 // EXTRACT_PS - Extract attributes from entity to create new entity
 // Example: EXTRACT_PS (a, b, c) FROM Entity INTO NewEntity
@@ -296,9 +306,14 @@ move_ps: MOVE_PS qualifiedName TO qualifiedName;
 // Example: MERGE_PS A, B INTO C AS alias
 merge_ps: MERGE_PS identifier COMMA identifier INTO identifier (AS identifier)?;
 
-// SPLIT_PS: Divide one entity into two separate entities (vertical partitioning)
-// Example: SPLIT_PS User INTO Person (name, age), Account (email, password)
-split_ps: SPLIT_PS identifier INTO splitPartPs COMMA splitPartPs;
+// SPLIT_PS: Divide one entity into multiple separate entities (vertical partitioning)
+// Reference: André Conrad - "SPLIT Person into Person:id, firstname, lastname AND knows:id, knows"
+// Example: SPLIT_PS person INTO person(person_id, vorname, nachname, age), person_tag(person_id, tags)
+//   Before: person { person_id, vorname, nachname, age, tags[] }
+//   After:  person { person_id, vorname, nachname, age }
+//          person_tag { person_id, tags[] }
+// Note: Fields can be duplicated across parts (e.g., person_id in both parts)
+split_ps: SPLIT_PS identifier INTO splitPartPs (COMMA splitPartPs)+;
 splitPartPs: identifier LPAREN identifierList RPAREN;
 
 // CAST_PS: Change the data type of an attribute

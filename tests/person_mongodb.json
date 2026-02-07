@@ -10,8 +10,12 @@
       "description": "Primary key"
     },
     "name": {
-      "bsonType": "string",
-      "description": "Person name"
+      "bsonType": "object",
+      "description": "Person name with vorname and nachname",
+      "properties": {
+        "vorname": { "bsonType": "string" },
+        "nachname": { "bsonType": "string" }
+      }
     },
     "age": {
       "bsonType": "string",

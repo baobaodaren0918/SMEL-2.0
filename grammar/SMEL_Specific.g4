@@ -244,25 +244,35 @@ rename_reltype: RENAME_RELTYPE identifier TO identifier;
 // STRUCTURE OPERATIONS
 // ============================================================================
 
-// FLATTEN - Extract nested object to separate table (non-array)
-// Example: FLATTEN person.address AS address
-// Note: Use separate ADD_PRIMARY_KEY, ADD_FOREIGN_KEY operations for constraints
-flatten: FLATTEN qualifiedName AS identifier;
+// FLATTEN - Flatten nested object fields into parent table (reduce depth by 1)
+// Reference: André Conrad - "Die Operation FLATTEN erstellt aus dem Objekt in der Spalte
+//            jeweils eine Spalte für jedes Attribut dieses Objekts"
+// Example: FLATTEN person.name
+//   Before: person { name: { vorname, nachname }, age }
+//   After:  person { name_vorname, name_nachname, age }
+flatten: FLATTEN qualifiedName;
 
-// UNWIND - Expand array field into separate table
-// Example: UNWIND person.tags[] INTO person_tag
+// UNNEST - Extract nested object to separate table (normalization)
+// This is the reverse of NEST - extracts embedded document to new table
+// Example: UNNEST person.address:street,city AS address WITH person.person_id
+//   Before: person { person_id, address: { street, city } }
+//   After:  person { person_id }
+//          address { person_id, street, city }
+// Note: Use separate ADD_PRIMARY_KEY, ADD_FOREIGN_KEY for constraints
+unnest: UNNEST qualifiedName COLON identifierList AS identifier WITH qualifiedName;
+
+// UNWIND - Expand array field into multiple rows
+// Reference: André Conrad - array expansion operation
+// Supports two modes:
+//   1. Expand in place: UNWIND person_tag.tags (expands array within existing table)
+//   2. Create new table: UNWIND person.tags[] INTO person_tag (legacy, creates new table)
 // Note: Use separate ADD_PRIMARY_KEY, ADD_FOREIGN_KEY, RENAME_FEATURE for constraints
-unwind: UNWIND qualifiedName INTO identifier;
+unwind: UNWIND qualifiedName (INTO identifier)?;
 
 // NEST - Merge separate table into embedded document (PostgreSQL -> MongoDB)
 // Example: NEST address INTO person AS address WITH CARDINALITY ONE_TO_ONE
 nest: NEST identifier INTO identifier AS identifier nestClause*;
 nestClause: withCardinalityClause | usingKeyClause | whereClause;
-
-// UNNEST - Extract embedded document to separate table (MongoDB -> PostgreSQL)
-// Example: UNNEST address FROM person
-unnest: UNNEST identifier FROM identifier unnestClause*;
-unnestClause: AS identifier | usingKeyClause;
 
 // EXTRACT - Extract attributes from entity to create new entity
 // Example: EXTRACT (a, b, c) FROM Entity INTO NewEntity
@@ -291,9 +301,14 @@ move: MOVE qualifiedName TO qualifiedName;
 // Example: MERGE A, B INTO C AS alias
 merge: MERGE identifier COMMA identifier INTO identifier (AS identifier)?;
 
-// SPLIT: Divide one entity into two separate entities (vertical partitioning)
-// Example: SPLIT User INTO Person (name, age), Account (email, password)
-split: SPLIT identifier INTO splitPart COMMA splitPart;
+// SPLIT: Divide one entity into multiple separate entities (vertical partitioning)
+// Reference: André Conrad - "SPLIT Person into Person:id, firstname, lastname AND knows:id, knows"
+// Example: SPLIT person INTO person(person_id, vorname, nachname, age), person_tag(person_id, tags)
+//   Before: person { person_id, vorname, nachname, age, tags[] }
+//   After:  person { person_id, vorname, nachname, age }
+//          person_tag { person_id, tags[] }
+// Note: Fields can be duplicated across parts (e.g., person_id in both parts)
+split: SPLIT identifier INTO splitPart (COMMA splitPart)+;
 splitPart: identifier LPAREN identifierList RPAREN;
 
 // CAST: Change the data type of an attribute
